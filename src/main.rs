@@ -66,17 +66,17 @@ fn setup(
     commands.spawn((
         PbrBundle {
             mesh: meshes.add(mesh),
-            material: materials.add(Color::rgb(0.0, 0.7, 0.7).into()),
+            material: materials.add(Color::rgba(0.0, 0.7, 0.7, 0.0).into()),
             transform: Transform::from_xyz(0.0, 0.5, 0.0),
             ..default()
         },
         Wireframe,
         VoxelGridData {
-            size: Vec3::new(2.0, 2.0, 2.0),
+            size: UVec3::new(2, 2, 2),
             data: Arc::new(Mutex::new(Some(vec![0, 1, 2, 3, 4, 5, 6, 7]))),
         },
         VoxelGridStorageBuffer {
-            size: Vec3::new(2.0, 2.0, 2.0),
+            size: UVec3::new(2, 2, 2),
             buffer: default(),
         },
         CopyVoxelGridToStorageBuffer,

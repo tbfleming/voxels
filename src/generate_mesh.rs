@@ -1,5 +1,6 @@
 use bevy::{
     core::cast_slice,
+    math::Vec4Swizzles,
     prelude::*,
     reflect::TypePath,
     render::{
@@ -23,9 +24,15 @@ use crate::voxel::*;
 const WGSL_MESH_BINDING: u32 = 0;
 const WGSL_FACE_FILLED_BINDING: u32 = 1;
 
-const WGSL_VEC3_STRIDE: usize = size_of::<[f32; 4]>(); // WGSL pads vec3
-const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * 6; // 6 vertices per face
-const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * 6; // 6 faces per voxel
+const WGSL_VEC3_STRIDE: usize = size_of::<Vec4>(); // WGSL pads vec3
+const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * VERTEXES_PER_FACE;
+const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * FACES_PER_VOXEL;
+
+const VERTEXES_PER_FACE: usize = 6;
+const FACES_PER_VOXEL: usize = 6;
+const FACE_FILLED_NUM_BITS: u32 = 30;
+const GENERATE_MESH_WORKGROUP_SIZE: u32 = 64;
+const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
 
 pub struct GenerateMeshPlugin;
 
@@ -102,11 +109,19 @@ fn prepare_generate_mesh(
         let GenerateMeshState::Init = &*mesh_state_guard else {
             continue;
         };
-        // println!("** prepare_generate_mesh: Init");
+        println!("** prepare_generate_mesh: Init");
+        println!("   size: {:?}", voxel_grid_storage_buffer.size);
 
-        let num_voxels = 1;
+        let num_voxels = voxel_grid_storage_buffer.size.x as usize
+            * voxel_grid_storage_buffer.size.y as usize
+            * voxel_grid_storage_buffer.size.z as usize;
+        println!("   num_voxels: {:?}", num_voxels);
         let face_filled_offset = num_voxels * WGSL_FACES_STRIDE;
-        let buffer_size = face_filled_offset + (num_voxels + 31) / 32 * 4;
+        println!("   face_filled_offset: {:?}", face_filled_offset);
+        let num_faces = num_voxels * FACES_PER_VOXEL;
+        let buffer_size = face_filled_offset
+            + (num_faces + FACE_FILLED_NUM_BITS as usize - 1) / FACE_FILLED_NUM_BITS as usize * 4;
+        println!("   buffer_size: {:?}", buffer_size);
         let storage_buffer = render_device.create_buffer(&BufferDescriptor {
             label: None,
             size: buffer_size as u64,
@@ -125,7 +140,7 @@ fn prepare_generate_mesh(
             usage: BufferUsages::UNIFORM,
             mapped_at_creation: true,
         });
-        cast_slice_mut::<u8, Vec3>(&mut uniform_buffer.slice(..).get_mapped_range_mut())[0] =
+        cast_slice_mut::<u8, UVec3>(&mut uniform_buffer.slice(..).get_mapped_range_mut())[0] =
             voxel_grid_storage_buffer.size;
         uniform_buffer.unmap();
 
@@ -214,7 +229,7 @@ fn finalize_generate_mesh(
             println!("** finalize_generate_mesh");
 
             let raw = data.copy_buffer.slice(..).get_mapped_range();
-            let src_vertexes = cast_slice::<u8, [f32; 4]>(&raw[..data.face_filled_offset]);
+            let src_vertexes = cast_slice::<u8, Vec4>(&raw[..data.face_filled_offset]);
             let face_filled = cast_slice::<u8, u32>(&raw[data.face_filled_offset..]);
 
             let mut num_faces = 0;
@@ -222,15 +237,18 @@ fn finalize_generate_mesh(
                 num_faces += mask.count_ones() as usize;
             }
 
-            let mut vertexes: Vec<[f32; 3]> = Vec::new();
-            vertexes.resize(num_faces * 6, [0.0, 0.0, 0.0]);
+            let mut vertexes: Vec<Vec3> = Vec::new();
+            vertexes.resize(num_faces * VERTEXES_PER_FACE, default());
 
             let mut filled = 0;
-            for i in 0..data.num_voxels * 6 {
-                if face_filled[i / 32] & (1 << (i % 32)) != 0 {
-                    for j in 0..6 {
-                        vertexes[filled * 6 + j] =
-                            src_vertexes[i * 6 + j][0..3].try_into().unwrap();
+            for i in 0..data.num_voxels * FACES_PER_VOXEL {
+                if face_filled[i / FACE_FILLED_NUM_BITS as usize]
+                    & (1 << (i % FACE_FILLED_NUM_BITS as usize))
+                    != 0
+                {
+                    for j in 0..VERTEXES_PER_FACE {
+                        vertexes[filled * VERTEXES_PER_FACE + j] =
+                            src_vertexes[i * VERTEXES_PER_FACE + j].xyz();
                     }
                     filled += 1;
                 }
@@ -313,7 +331,7 @@ impl FromWorld for GenerationPipeline {
             push_constant_ranges: Vec::new(),
             shader,
             shader_defs: vec![],
-            entry_point: Cow::from("foo"),
+            entry_point: Cow::from("generate_mesh"),
         });
 
         GenerationPipeline {

@@ -32,14 +32,14 @@ impl Plugin for VoxelPlugin {
 // lock order: VoxelGridData, VoxelGridStorageBuffer
 #[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
 pub struct VoxelGridData {
-    pub size: Vec3,
+    pub size: UVec3,
     pub data: Arc<Mutex<Option<Vec<u32>>>>,
 }
 
 // lock order: VoxelGridData, VoxelGridStorageBuffer
 #[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
 pub struct VoxelGridStorageBuffer {
-    pub size: Vec3,
+    pub size: UVec3,
     pub buffer: Arc<Mutex<Option<Buffer>>>,
 }
 
