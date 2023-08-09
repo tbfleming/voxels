@@ -21,11 +21,11 @@ const WGSL_VEC3_STRIDE: usize = size_of::<[f32; 4]>(); // WGSL pads vec3
 const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * 6; // 6 vertices per face
 const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * 6; // 6 faces per voxel
 
-pub struct VoxelPlugin;
+pub struct GenerateMeshPlugin;
 
-impl Plugin for VoxelPlugin {
+impl Plugin for GenerateMeshPlugin {
     fn build(&self, app: &mut App) {
-        println!("** VoxelPlugin::build");
+        println!("** GenerateMeshPlugin::build");
         app.add_plugins(ExtractComponentPlugin::<GenerateMesh>::default());
         app.add_systems(First, finalize_generate_mesh);
 
@@ -34,8 +34,11 @@ impl Plugin for VoxelPlugin {
         render_app.add_systems(Render, map_generate_mesh.in_set(RenderSet::Cleanup));
 
         let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
-        render_graph.add_node("foo", GenerationNode);
-        render_graph.add_node_edge("foo", bevy::render::main_graph::node::CAMERA_DRIVER);
+        render_graph.add_node("generate_mesh", GenerationNode);
+        render_graph.add_node_edge(
+            "generate_mesh",
+            bevy::render::main_graph::node::CAMERA_DRIVER,
+        );
     }
 
     fn finish(&self, app: &mut App) {

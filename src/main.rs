@@ -11,8 +11,8 @@ use bevy_editor_pls::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_screen_diagnostics::{ScreenDiagnosticsPlugin, ScreenFrameDiagnosticsPlugin};
 
-mod voxel;
-use voxel::*;
+mod generate_mesh;
+use generate_mesh::*;
 
 fn main() {
     App::new()
@@ -27,7 +27,7 @@ fn main() {
             PanOrbitCameraPlugin,
             ScreenDiagnosticsPlugin::default(),
             ScreenFrameDiagnosticsPlugin,
-            VoxelPlugin,
+            GenerateMeshPlugin,
         ))
         .add_systems(Startup, setup)
         .run();
