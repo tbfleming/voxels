@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use bevy::{
     pbr::wireframe::Wireframe,
     prelude::*,
@@ -30,6 +32,7 @@ fn main() {
             PanOrbitCameraPlugin,
             ScreenDiagnosticsPlugin::default(),
             ScreenFrameDiagnosticsPlugin,
+            VoxelPlugin,
             GenerateMeshPlugin,
         ))
         .add_systems(Startup, setup)
@@ -68,6 +71,15 @@ fn setup(
             ..default()
         },
         Wireframe,
+        VoxelGridData {
+            size: Vec3::new(2.0, 2.0, 2.0),
+            data: Arc::new(Mutex::new(Some(vec![0, 1, 2, 3, 4, 5, 6, 7]))),
+        },
+        VoxelGridStorageBuffer {
+            size: Vec3::new(2.0, 2.0, 2.0),
+            buffer: default(),
+        },
+        CopyVoxelGridToStorageBuffer,
         GenerateMesh::new(),
     ));
     commands.spawn(PointLightBundle {

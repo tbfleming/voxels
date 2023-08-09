@@ -12,6 +12,9 @@ use bevy::{
 };
 use std::sync::{Arc, Mutex};
 
+pub(crate) const WGSL_VOXEL_GRID_IN_SIZE_BINDING: u32 = 2;
+pub(crate) const WGSL_VOXEL_GRID_IN_BINDING: u32 = 3;
+
 pub struct VoxelPlugin;
 
 impl Plugin for VoxelPlugin {
@@ -26,12 +29,14 @@ impl Plugin for VoxelPlugin {
     }
 }
 
+// lock order: VoxelGridData, VoxelGridStorageBuffer
 #[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
 pub struct VoxelGridData {
     pub size: Vec3,
     pub data: Arc<Mutex<Option<Vec<u32>>>>,
 }
 
+// lock order: VoxelGridData, VoxelGridStorageBuffer
 #[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
 pub struct VoxelGridStorageBuffer {
     pub size: Vec3,
@@ -46,10 +51,9 @@ fn copy_data_to_storage(
     render_device: Res<RenderDevice>,
     query: Query<(&VoxelGridData, &VoxelGridStorageBuffer), Has<CopyVoxelGridToStorageBuffer>>,
 ) {
-    // println!("** copy_data_to_storage");
     for (voxel_grid_data, voxel_grid_storage_buffer) in query.iter() {
-        // println!("** copy_data_to_storage: ?");
         if voxel_grid_data.size != voxel_grid_storage_buffer.size {
+            println!("** copy_data_to_storage: size mismatch");
             continue;
         }
         let data = voxel_grid_data.data.lock().unwrap();
@@ -57,7 +61,11 @@ fn copy_data_to_storage(
         if buffer.is_some() {
             continue;
         }
-        let Some(data) = &*data else {continue;};
+        let Some(data) = &*data else {
+            println!("** copy_data_to_storage: no data");
+            continue;
+        };
+        println!("** copy_data_to_storage");
         let storage_buffer = render_device.create_buffer(&BufferDescriptor {
             label: None,
             size: (data.len() * 4) as u64,

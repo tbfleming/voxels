@@ -6,6 +6,12 @@ var<storage,read_write> mesh: array<vec3<f32>>;
 @group(0) @binding(1)
 var<storage,read_write> face_filled: array<u32>;
 
+@group(0) @binding(2)
+var<uniform> voxel_grid_in_size: vec3<u32>;
+
+@group(0) @binding(3)
+var<storage,read> voxel_grid_in: array<u32>;
+
 fn write_face(index: i32, filled: bool, face: face) {
     face_filled[index/32] = face_filled[index/32] | (u32(filled) << (u32(index) % 32u));
     mesh[index * 6 + 0] = face[0];
