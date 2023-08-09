@@ -12,7 +12,10 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_screen_diagnostics::{ScreenDiagnosticsPlugin, ScreenFrameDiagnosticsPlugin};
 
 mod generate_mesh;
+mod voxel;
+
 use generate_mesh::*;
+use voxel::*;
 
 fn main() {
     App::new()

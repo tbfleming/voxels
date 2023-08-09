@@ -25,7 +25,6 @@ pub struct GenerateMeshPlugin;
 
 impl Plugin for GenerateMeshPlugin {
     fn build(&self, app: &mut App) {
-        println!("** GenerateMeshPlugin::build");
         app.add_plugins(ExtractComponentPlugin::<GenerateMesh>::default());
         app.add_systems(First, finalize_generate_mesh);
 
@@ -84,12 +83,12 @@ fn prepare_generate_mesh(
     mut pipeline: ResMut<GenerationPipeline>,
     generate_meshes: Query<&GenerateMesh>,
 ) {
-    // println!("** prepare_generate_meshes");
+    // println!("** prepare_generate_mesh");
     for generated_mesh in generate_meshes.iter() {
-        // println!("** prepare_generate_meshes: ?");
+        // println!("** prepare_generate_mesh: ?");
         let mut guard = generated_mesh.0.lock().unwrap();
         if let GenerateMeshState::Init = &*guard {
-            // println!("** prepare_generate_meshes: Init");
+            // println!("** prepare_generate_mesh: Init");
             let num_voxels = 1;
             let face_filled_offset = num_voxels * WGSL_FACES_STRIDE;
             let buffer_size = face_filled_offset + (num_voxels + 31) / 32 * 4;
