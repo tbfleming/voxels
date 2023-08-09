@@ -65,8 +65,7 @@ fn setup(
             ..default()
         },
         Wireframe,
-        GeneratedMeshBuffer(default()),
-        GenerateMesh,
+        GenerateMesh::new(),
     ));
     commands.spawn(PointLightBundle {
         transform: Transform::from_xyz(4.0, 8.0, 4.0),
