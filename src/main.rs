@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use bevy::{
     pbr::wireframe::Wireframe,
     prelude::*,
@@ -13,10 +11,6 @@ use bevy_editor_pls::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_screen_diagnostics::{ScreenDiagnosticsPlugin, ScreenFrameDiagnosticsPlugin};
 
-mod generate_mesh;
-mod voxel;
-
-use generate_mesh::*;
 use voxel::*;
 
 fn main() {
@@ -71,10 +65,7 @@ fn setup(
             ..default()
         },
         Wireframe,
-        VoxelGridData {
-            size: UVec3::new(2, 2, 2),
-            data: Arc::new(Mutex::new(Some(vec![0, 1, 2, 3, 4, 5, 6, 7]))),
-        },
+        VoxelGridData::new(UVec3::new(2, 2, 2), 1),
         VoxelGridStorageBuffer {
             size: UVec3::new(2, 2, 2),
             buffer: default(),

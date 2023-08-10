@@ -24,6 +24,25 @@ var<uniform> voxel_grid_in_size: vec3<u32>;
 @group(0) @binding(3)
 var<storage,read> voxel_grid_in: array<u32>;
 
+struct voxel {
+    corner: vec3<f32>,
+    material: u32,
+}
+
+fn read_voxel(pos: vec3<i32>) -> voxel {
+    let index = //
+        (pos.x + 1) + //
+        (pos.y + 1) * i32(voxel_grid_in_size.x + 2u) + //
+        (pos.z + 1) * i32((voxel_grid_in_size.x + 2u) * (voxel_grid_in_size.y + 2u));
+    let raw = voxel_grid_in[index];
+    let unpacked = unpack4x8snorm(raw);
+    return voxel(vec3<f32>(
+        unpacked.x * 127.0 / 64.0,
+        unpacked.y * 127.0 / 64.0,
+        unpacked.z * 127.0 / 64.0
+    ), raw >> 24u);
+}
+
 fn write_face(pos: vec3<f32>, index: i32, filled: bool, face: face) {
     if filled {
         face_filled[index / 30] |= 1u << (u32(index) % 30u);
@@ -36,7 +55,8 @@ fn write_face(pos: vec3<f32>, index: i32, filled: bool, face: face) {
     }
 }
 
-// Each invocation converts 5 voxels (30 faces) and fills 1 entry of face_filled
+// Each invocation converts 5 voxels (30 faces) and fills 1 entry of face_filled.
+// Each workgroup converts a little more than a 6*7*7 cube of voxels.
 @compute @workgroup_size(64)
 fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
     for (var i = 0u; i < 5u; i += 1u) {
@@ -45,27 +65,44 @@ fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
             break;
         }
         let face_index = i32(voxel_index) * 6;
-        let pos = vec3(
+        let pos_u32 = vec3(
             voxel_index % voxel_grid_in_size.x,
             (voxel_index / voxel_grid_in_size.x) % voxel_grid_in_size.y,
             voxel_index / (voxel_grid_in_size.x * voxel_grid_in_size.y)
         );
-        let pos_f32 = vec3<f32>(pos);
+        let pos_i32 = vec3<i32>(pos_u32);
+        let pos_f32 = vec3<f32>(pos_u32);
 
-        let p000 = vec3<f32>(0.0, 0.0, 0.0);
-        let p001 = vec3<f32>(0.0, 0.0, 1.0);
-        let p010 = vec3<f32>(0.0, 1.0, 0.0);
-        let p011 = vec3<f32>(0.0, 1.0, 1.0);
-        let p100 = vec3<f32>(1.0, 0.0, 0.0);
-        let p101 = vec3<f32>(1.0, 0.0, 1.0);
-        let p110 = vec3<f32>(1.0, 1.0, 0.0);
-        let p111 = vec3<f32>(1.0, 1.0, 1.0);
+        let vox_000 = read_voxel(pos_i32 + vec3<i32>(0, 0, 0));
+        if vox_000.material == 0u {
+            continue;
+        }
+        let vox_001 = read_voxel(pos_i32 + vec3<i32>(0, 0, 1));
+        let vox_010 = read_voxel(pos_i32 + vec3<i32>(0, 1, 0));
+        let vox_011 = read_voxel(pos_i32 + vec3<i32>(0, 1, 1));
+        let vox_100 = read_voxel(pos_i32 + vec3<i32>(1, 0, 0));
+        let vox_101 = read_voxel(pos_i32 + vec3<i32>(1, 0, 1));
+        let vox_110 = read_voxel(pos_i32 + vec3<i32>(1, 1, 0));
+        let vox_111 = read_voxel(pos_i32 + vec3<i32>(1, 1, 1));
 
-        write_face(pos_f32, face_index + 0, true, face(p001, p101, p111, p111, p011, p001)); // z=1
-        write_face(pos_f32, face_index + 1, true, face(p101, p100, p110, p110, p111, p101)); // x=1
-        write_face(pos_f32, face_index + 2, true, face(p100, p000, p010, p010, p110, p100)); // z=0
-        write_face(pos_f32, face_index + 3, true, face(p000, p001, p011, p011, p010, p000)); // x=0
-        write_face(pos_f32, face_index + 4, true, face(p011, p111, p110, p110, p010, p011)); // y=1
-        write_face(pos_f32, face_index + 5, true, face(p000, p100, p101, p101, p001, p000)); // y=0
+        let vox_00n = read_voxel(pos_i32 + vec3<i32>(0, 0, -1));
+        let vox_0n0 = read_voxel(pos_i32 + vec3<i32>(0, -1, 0));
+        let vox_n00 = read_voxel(pos_i32 + vec3<i32>(-1, 0, 0));
+
+        let p000 = vec3<f32>(0.0, 0.0, 0.0) + vox_000.corner;
+        let p001 = vec3<f32>(0.0, 0.0, 1.0) + vox_001.corner;
+        let p010 = vec3<f32>(0.0, 1.0, 0.0) + vox_010.corner;
+        let p011 = vec3<f32>(0.0, 1.0, 1.0) + vox_011.corner;
+        let p100 = vec3<f32>(1.0, 0.0, 0.0) + vox_100.corner;
+        let p101 = vec3<f32>(1.0, 0.0, 1.0) + vox_101.corner;
+        let p110 = vec3<f32>(1.0, 1.0, 0.0) + vox_110.corner;
+        let p111 = vec3<f32>(1.0, 1.0, 1.0) + vox_111.corner;
+
+        write_face(pos_f32, face_index + 0, vox_001.material == 0u, face(p001, p101, p111, p111, p011, p001)); // z=1
+        write_face(pos_f32, face_index + 1, vox_100.material == 0u, face(p101, p100, p110, p110, p111, p101)); // x=1
+        write_face(pos_f32, face_index + 2, vox_00n.material == 0u, face(p100, p000, p010, p010, p110, p100)); // z=0
+        write_face(pos_f32, face_index + 3, vox_n00.material == 0u, face(p000, p001, p011, p011, p010, p000)); // x=0
+        write_face(pos_f32, face_index + 4, vox_010.material == 0u, face(p011, p111, p110, p110, p010, p011)); // y=1
+        write_face(pos_f32, face_index + 5, vox_0n0.material == 0u, face(p000, p100, p101, p101, p001, p000)); // y=0
     }
 }

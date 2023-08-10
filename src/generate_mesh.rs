@@ -111,6 +111,7 @@ fn prepare_generate_mesh(
         };
         println!("** prepare_generate_mesh: Init");
         println!("   size: {:?}", voxel_grid_storage_buffer.size);
+        println!("   grid_buffer size: {:?}", grid_buffer.size());
 
         let num_voxels = voxel_grid_storage_buffer.size.x as usize
             * voxel_grid_storage_buffer.size.y as usize
@@ -234,6 +235,7 @@ fn finalize_generate_mesh(
 
             let mut num_faces = 0;
             for mask in face_filled {
+                // println!("   mask: {:#08x}", mask);
                 num_faces += mask.count_ones() as usize;
             }
 
@@ -246,6 +248,7 @@ fn finalize_generate_mesh(
                     & (1 << (i % FACE_FILLED_NUM_BITS as usize))
                     != 0
                 {
+                    // println!("   fill face: {:?}", i);
                     for j in 0..VERTEXES_PER_FACE {
                         vertexes[filled * VERTEXES_PER_FACE + j] =
                             src_vertexes[i * VERTEXES_PER_FACE + j].xyz();
@@ -253,6 +256,8 @@ fn finalize_generate_mesh(
                     filled += 1;
                 }
             }
+            // println!("   filled: {:?}", filled);
+            // println!("   num_faces: {:?}", num_faces);
             assert!(filled == num_faces);
 
             // println!("{:?}\n", src_vertexes);
@@ -314,7 +319,7 @@ impl FromWorld for GenerationPipeline {
                             binding: WGSL_VOXEL_GRID_IN_BINDING,
                             visibility: ShaderStages::COMPUTE,
                             ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
+                                ty: BufferBindingType::Storage { read_only: true },
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
                             },
