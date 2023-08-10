@@ -33,6 +33,8 @@ const FACES_PER_VOXEL: usize = 6;
 const FACE_FILLED_NUM_BITS: u32 = 30;
 const GENERATE_MESH_WORKGROUP_SIZE: u32 = 64;
 const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
+const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
+    GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
 
 pub struct GenerateMeshPlugin;
 
@@ -373,7 +375,12 @@ impl render_graph::Node for GenerationNode {
                     .begin_compute_pass(&ComputePassDescriptor::default());
                 pass.set_bind_group(0, &data.bind_group, &[]);
                 pass.set_pipeline(pipeline);
-                pass.dispatch_workgroups(1, 1, 1);
+                pass.dispatch_workgroups(
+                    (data.num_voxels as u32 + GENERATE_MESH_VOXELS_PER_WORKGROUP - 1)
+                        / GENERATE_MESH_VOXELS_PER_WORKGROUP,
+                    1,
+                    1,
+                );
             }
             render_context.command_encoder().copy_buffer_to_buffer(
                 &data.storage_buffer,

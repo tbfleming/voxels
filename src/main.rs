@@ -65,12 +65,10 @@ fn setup(
             ..default()
         },
         Wireframe,
-        VoxelGridData::new(UVec3::new(2, 2, 2), 1),
-        VoxelGridStorageBuffer {
-            size: UVec3::new(2, 2, 2),
-            buffer: default(),
-        },
-        CopyVoxelGridToStorageBuffer,
+        // VoxelGridData::new(UVec3::new(2, 2, 2), 1),
+        // VoxelGridStorageBuffer::new(UVec3::new(2, 2, 2)),
+        VoxelGridData::sphere(6, 1),
+        VoxelGridStorageBuffer::new(UVec3::new(6, 6, 6)),
         GenerateMesh::new(),
     ));
     commands.spawn(PointLightBundle {
@@ -79,7 +77,8 @@ fn setup(
     });
     commands.spawn((
         Camera3dBundle {
-            transform: Transform::from_xyz(3.5, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(3.5 + 20.0, 2.5 + 20.0, 5.0 + 20.0)
+                .looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
         PanOrbitCamera::default(),
