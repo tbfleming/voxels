@@ -66,9 +66,9 @@ fn setup(
         },
         Wireframe,
         // VoxelGridData::new(UVec3::new(2, 2, 2), 1),
-        // VoxelGridStorageBuffer::new(UVec3::new(2, 2, 2)),
+        // VoxelGrid::new(UVec3::new(2, 2, 2)),
         sphere(6, 1),
-        VoxelGridStorageBuffer::new(UVec3::new(6, 6, 6)),
+        VoxelGrid::new(UVec3::new(6, 6, 6)),
         GenerateMesh::new(),
     ));
     commands.spawn(PointLightBundle {

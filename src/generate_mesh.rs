@@ -62,7 +62,7 @@ impl Plugin for GenerateMeshPlugin {
     }
 }
 
-// lock order: VoxelGridStorageBuffer, GenerateMesh
+// lock order: VoxelGrid, GenerateMesh
 #[derive(Component, Default, Clone, Debug, TypePath, ExtractComponent)]
 #[component(storage = "SparseSet")]
 pub struct GenerateMesh(SharedGenerateMeshState);
@@ -98,7 +98,7 @@ struct GenerateMeshData {
 fn prepare_generate_mesh(
     render_device: Res<RenderDevice>,
     mut pipeline: ResMut<GenerationPipeline>,
-    generate_meshes: Query<(&GenerateMesh, &VoxelGridStorageBuffer)>,
+    generate_meshes: Query<(&GenerateMesh, &VoxelGrid)>,
 ) {
     // println!("** prepare_generate_mesh");
     for (generate_mesh, voxel_grid_storage_buffer) in generate_meshes.iter() {

@@ -20,12 +20,12 @@ pub struct VoxelPlugin;
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractComponentPlugin::<VoxelGridData>::default());
-        app.add_plugins(ExtractComponentPlugin::<VoxelGridStorageBuffer>::default());
-        app.add_plugins(ExtractComponentPlugin::<CopyVoxelGridToStorageBuffer>::default());
-        app.add_systems(First, finalize_copy_data_to_storage);
+        app.add_plugins(ExtractComponentPlugin::<VoxelGrid>::default());
+        app.add_plugins(ExtractComponentPlugin::<CopyDataToVoxelGrid>::default());
+        app.add_systems(First, finalize_copy_data_to_voxel_grid);
 
         let render_app = app.sub_app_mut(RenderApp);
-        render_app.add_systems(Render, copy_data_to_storage.in_set(RenderSet::Prepare));
+        render_app.add_systems(Render, copy_data_to_voxel_grid.in_set(RenderSet::Prepare));
     }
 }
 
@@ -44,7 +44,7 @@ impl Plugin for VoxelPlugin {
 // offsets at the end padding complete the voxel bounds. Non-0 material in padding
 // excludes the faces at the edges of the voxel grid.
 //
-// lock order: VoxelGridData, VoxelGridStorageBuffer
+// lock order: VoxelGridData, VoxelGrid
 #[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
 pub struct VoxelGridData {
     pub size: UVec3,
@@ -77,14 +77,14 @@ impl VoxelGridData {
     }
 }
 
-// lock order: VoxelGridData, VoxelGridStorageBuffer
+// lock order: VoxelGridData, VoxelGrid
 #[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
-pub struct VoxelGridStorageBuffer {
+pub struct VoxelGrid {
     pub size: UVec3,
     pub buffer: Arc<Mutex<Option<Buffer>>>,
 }
 
-impl VoxelGridStorageBuffer {
+impl VoxelGrid {
     pub fn new(size: UVec3) -> Self {
         Self {
             size,
@@ -95,11 +95,11 @@ impl VoxelGridStorageBuffer {
 
 #[derive(Component, Default, Clone, Debug, TypePath, ExtractComponent)]
 #[component(storage = "SparseSet")]
-pub struct CopyVoxelGridToStorageBuffer;
+pub struct CopyDataToVoxelGrid;
 
-fn copy_data_to_storage(
+fn copy_data_to_voxel_grid(
     render_device: Res<RenderDevice>,
-    query: Query<(&VoxelGridData, &VoxelGridStorageBuffer), Has<CopyVoxelGridToStorageBuffer>>,
+    query: Query<(&VoxelGridData, &VoxelGrid), Has<CopyDataToVoxelGrid>>,
 ) {
     for (voxel_grid_data, voxel_grid_storage_buffer) in query.iter() {
         if voxel_grid_data.size != voxel_grid_storage_buffer.size {
@@ -136,16 +136,14 @@ fn copy_data_to_storage(
     }
 }
 
-fn finalize_copy_data_to_storage(
+fn finalize_copy_data_to_voxel_grid(
     mut commands: Commands,
-    query: Query<(Entity, &VoxelGridStorageBuffer), Has<CopyVoxelGridToStorageBuffer>>,
+    query: Query<(Entity, &VoxelGrid), Has<CopyDataToVoxelGrid>>,
 ) {
     for (entity, voxel_grid_storage_buffer) in query.iter() {
         let buffer = voxel_grid_storage_buffer.buffer.lock().unwrap();
         if buffer.is_some() {
-            commands
-                .entity(entity)
-                .remove::<CopyVoxelGridToStorageBuffer>();
+            commands.entity(entity).remove::<CopyDataToVoxelGrid>();
         }
     }
 }
