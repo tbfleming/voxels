@@ -1,7 +1,14 @@
-use bytemuck::cast_slice;
-use glam::{UVec3, Vec4};
-use std::mem::size_of;
-use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device};
+use bytemuck::{cast_slice, cast_slice_mut};
+use glam::{UVec3, Vec3, Vec4};
+use std::{mem::size_of, num::NonZeroU64, sync::Arc};
+use wgpu::{
+    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferAsyncError, BufferBinding,
+    BufferBindingType, BufferDescriptor, BufferUsages, CommandEncoder, ComputePassDescriptor,
+    ComputePipeline, Device, MapMode, ShaderStages,
+};
+
+pub const GENERATE_MESH_ENTRY_POINT: &str = "generate_mesh";
 
 pub(crate) const WGSL_VOXEL_GRID_IN_SIZE_BINDING: u32 = 2;
 pub(crate) const WGSL_VOXEL_GRID_IN_BINDING: u32 = 3;
@@ -157,5 +164,248 @@ impl VoxelGridBuffer {
             .copy_from_slice(cast_slice::<u32, u8>(&content.data));
         buffer.buffer.unmap();
         buffer
+    }
+}
+
+/// Create BindGroupLayout for the shader's generate_mesh function.
+pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
+    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("generate_mesh_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: WGSL_VOXEL_GRID_IN_SIZE_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: WGSL_VOXEL_GRID_IN_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: WGSL_MESH_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: WGSL_FACE_FILLED_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Use the the shader's generate_mesh function to convert a
+/// voxel grid in VoxelGridBuffer to a mesh.
+///
+/// Call the following in order:
+/// * `[new]`
+/// * `[add_pass]`
+/// * `[add_copy]`. This may be on a different queue, but the
+///   copy's execution must happen after the pass's execution.
+/// * `[async_map_buffer]`. Only call this after the copy has
+///   finished.
+/// * `[get_mesh]`. Only call this after the map has finished.
+#[derive(Debug)]
+pub struct GenerateMeshImpl {
+    // Excludes padding
+    num_voxels: usize,
+
+    // Offset of face_filled in storage_buffer
+    face_filled_offset: usize,
+
+    // Size of storage_buffer and copy_buffer
+    buffer_size: usize,
+
+    // Receives the raw mesh from the shader. STORAGE | COPY_SRC
+    storage_buffer: Buffer,
+
+    // Copy of storage_buffer. COPY_DST | MAP_READ
+    copy_buffer: Arc<Buffer>,
+
+    bind_group: BindGroup,
+}
+
+impl GenerateMeshImpl {
+    /// Create buffers and bind group
+    pub fn new(
+        device: &Device,
+        bind_group_layout: &BindGroupLayout,
+        grid_buffer: &VoxelGridBuffer,
+    ) -> Self {
+        let num_voxels =
+            grid_buffer.size.x as usize * grid_buffer.size.y as usize * grid_buffer.size.z as usize;
+        println!("   num_voxels: {:?}", num_voxels);
+        let face_filled_offset = num_voxels * WGSL_FACES_STRIDE;
+        println!("   face_filled_offset: {:?}", face_filled_offset);
+        let num_faces = num_voxels * FACES_PER_VOXEL;
+        let buffer_size = face_filled_offset
+            + (num_faces + FACE_FILLED_NUM_BITS as usize - 1) / FACE_FILLED_NUM_BITS as usize * 4;
+
+        let storage_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: buffer_size as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let copy_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: buffer_size as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let uniform_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: size_of::<Vec3>() as u64,
+            usage: BufferUsages::UNIFORM,
+            mapped_at_creation: true,
+        });
+
+        cast_slice_mut::<u8, UVec3>(&mut uniform_buffer.slice(..).get_mapped_range_mut())[0] =
+            grid_buffer.size;
+        uniform_buffer.unmap();
+
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("generate_mesh_bind_group"),
+            layout: bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: WGSL_MESH_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &storage_buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(face_filled_offset as u64),
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_FACE_FILLED_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &storage_buffer,
+                        offset: face_filled_offset as u64,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_VOXEL_GRID_IN_SIZE_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &uniform_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_VOXEL_GRID_IN_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &grid_buffer.buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
+
+        Self {
+            num_voxels,
+            face_filled_offset,
+            buffer_size,
+            storage_buffer,
+            copy_buffer: copy_buffer.into(),
+            bind_group,
+        }
+    }
+
+    /// Add the compute pass to the command encoder
+    pub fn add_pass(&self, pipeline: &ComputePipeline, encoder: &mut CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor::default());
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_pipeline(pipeline);
+        pass.dispatch_workgroups(
+            (self.num_voxels as u32 + GENERATE_MESH_VOXELS_PER_WORKGROUP - 1)
+                / GENERATE_MESH_VOXELS_PER_WORKGROUP,
+            1,
+            1,
+        );
+    }
+
+    /// Add the buffer copy to the command encoder
+    pub fn add_copy(&self, encoder: &mut CommandEncoder) {
+        encoder.copy_buffer_to_buffer(
+            &self.storage_buffer,
+            0,
+            &self.copy_buffer,
+            0,
+            self.buffer_size as u64,
+        );
+    }
+
+    /// Map the copy buffer (async) then call the callback
+    pub fn async_map_buffer(
+        self,
+        done: impl FnOnce(GenerateMeshImpl, Result<(), BufferAsyncError>) + Send + 'static,
+    ) {
+        self.copy_buffer
+            .clone()
+            .slice(..)
+            .map_async(MapMode::Read, |result| done(self, result));
+    }
+
+    /// Get the mesh from the copy buffer
+    pub fn get_mesh(self) -> Vec<Vec3> {
+        let raw = self.copy_buffer.slice(..).get_mapped_range();
+        let src_vertexes = cast_slice::<u8, Vec4>(&raw[..self.face_filled_offset]);
+        let face_filled = cast_slice::<u8, u32>(&raw[self.face_filled_offset..]);
+
+        let mut num_faces = 0;
+        for mask in face_filled {
+            // println!("   mask: {:#08x}", mask);
+            num_faces += mask.count_ones() as usize;
+        }
+
+        let mut vertexes: Vec<Vec3> = Vec::new();
+        vertexes.resize(num_faces * VERTEXES_PER_FACE, Default::default());
+
+        let mut filled = 0;
+        for i in 0..self.num_voxels * FACES_PER_VOXEL {
+            if face_filled[i / FACE_FILLED_NUM_BITS as usize]
+                & (1 << (i % FACE_FILLED_NUM_BITS as usize))
+                != 0
+            {
+                // println!("   fill face: {:?}", i);
+                for j in 0..VERTEXES_PER_FACE {
+                    let v = src_vertexes[i * VERTEXES_PER_FACE + j];
+                    vertexes[filled * VERTEXES_PER_FACE + j] = Vec3 {
+                        x: v.x,
+                        y: v.y,
+                        z: v.z,
+                    };
+                }
+                filled += 1;
+            }
+        }
+        // println!("   filled: {:?}", filled);
+        // println!("   num_faces: {:?}", num_faces);
+        assert!(filled == num_faces);
+        vertexes
     }
 }

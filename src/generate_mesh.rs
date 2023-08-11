@@ -1,6 +1,4 @@
 use bevy::{
-    core::cast_slice,
-    math::Vec4Swizzles,
     prelude::*,
     reflect::TypePath,
     render::{
@@ -11,11 +9,9 @@ use bevy::{
         Render, RenderApp, RenderSet,
     },
 };
-use bytemuck::cast_slice_mut;
 use std::{
     borrow::Cow,
-    mem::{replace, size_of, take},
-    num::NonZeroU64,
+    mem::{replace, take},
     sync::{Arc, Mutex},
 };
 
@@ -64,20 +60,10 @@ type SharedGenerateMeshState = Arc<Mutex<GenerateMeshState>>;
 enum GenerateMeshState {
     #[default]
     Init,
-    Busy(GenerateMeshData),
+    Busy(GenerateMeshImpl),
     Mapping,
-    Mapped(GenerateMeshData),
+    Mapped(GenerateMeshImpl),
     Done,
-}
-
-#[derive(Debug)]
-struct GenerateMeshData {
-    num_voxels: usize,
-    face_filled_offset: usize,
-    buffer_size: usize,
-    storage_buffer: Buffer,
-    copy_buffer: Buffer,
-    bind_group: BindGroup,
 }
 
 fn prepare_generate_mesh(
@@ -98,84 +84,11 @@ fn prepare_generate_mesh(
         };
         println!("** prepare_generate_mesh: Init");
         println!("   size: {:?}", grid_buffer.size);
-
-        let num_voxels =
-            grid_buffer.size.x as usize * grid_buffer.size.y as usize * grid_buffer.size.z as usize;
-        println!("   num_voxels: {:?}", num_voxels);
-        let face_filled_offset = num_voxels * WGSL_FACES_STRIDE;
-        println!("   face_filled_offset: {:?}", face_filled_offset);
-        let num_faces = num_voxels * FACES_PER_VOXEL;
-        let buffer_size = face_filled_offset
-            + (num_faces + FACE_FILLED_NUM_BITS as usize - 1) / FACE_FILLED_NUM_BITS as usize * 4;
-        println!("   buffer_size: {:?}", buffer_size);
-        let storage_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: buffer_size as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let copy_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: buffer_size as u64,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let uniform_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: size_of::<Vec3>() as u64,
-            usage: BufferUsages::UNIFORM,
-            mapped_at_creation: true,
-        });
-        cast_slice_mut::<u8, UVec3>(&mut uniform_buffer.slice(..).get_mapped_range_mut())[0] =
-            grid_buffer.size;
-        uniform_buffer.unmap();
-
-        let bind_group = render_device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: WGSL_MESH_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &storage_buffer,
-                        offset: 0,
-                        size: NonZeroU64::new(face_filled_offset as u64),
-                    }),
-                },
-                BindGroupEntry {
-                    binding: WGSL_FACE_FILLED_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &storage_buffer,
-                        offset: face_filled_offset as u64,
-                        size: None,
-                    }),
-                },
-                BindGroupEntry {
-                    binding: WGSL_VOXEL_GRID_IN_SIZE_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &uniform_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                BindGroupEntry {
-                    binding: WGSL_VOXEL_GRID_IN_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &grid_buffer.buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-            ],
-        });
-        *mesh_state_guard = GenerateMeshState::Busy(GenerateMeshData {
-            num_voxels,
-            face_filled_offset,
-            buffer_size,
-            storage_buffer,
-            copy_buffer,
-            bind_group,
-        });
+        *mesh_state_guard = GenerateMeshState::Busy(GenerateMeshImpl::new(
+            render_device.wgpu_device(),
+            &pipeline.bind_group_layout,
+            grid_buffer,
+        ));
         pipeline.states.push(generate_mesh.0.clone());
     }
 }
@@ -184,20 +97,17 @@ fn map_generate_mesh(mut pipeline: ResMut<GenerationPipeline>) {
     for shared_state in take(&mut pipeline.states) {
         let mut guard = shared_state.lock().unwrap();
         let state = replace(&mut *guard, GenerateMeshState::Mapping);
-        let GenerateMeshState::Busy(data) = state else {
+        let GenerateMeshState::Busy(gen_impl) = state else {
             *guard = state;
             continue;
         };
         drop(guard);
-        data.copy_buffer
-            .clone()
-            .slice(..)
-            .map_async(MapMode::Read, move |res| {
-                println!("mapped?: {:?}", res);
-                if res.is_ok() {
-                    *shared_state.lock().unwrap() = GenerateMeshState::Mapped(data);
-                }
-            });
+        gen_impl.async_map_buffer(move |gen_impl, res| {
+            println!("mapped?: {:?}", res);
+            if res.is_ok() {
+                *shared_state.lock().unwrap() = GenerateMeshState::Mapped(gen_impl);
+            }
+        });
     }
 }
 
@@ -208,50 +118,18 @@ fn finalize_generate_mesh(
 ) {
     for (entity, generate_mesh) in query.iter_mut() {
         let mut guard = generate_mesh.0.lock().unwrap();
-        {
-            let GenerateMeshState::Mapped(data) = &*guard else {
-                continue;
-            };
-            println!("** finalize_generate_mesh");
-
-            let raw = data.copy_buffer.slice(..).get_mapped_range();
-            let src_vertexes = cast_slice::<u8, Vec4>(&raw[..data.face_filled_offset]);
-            let face_filled = cast_slice::<u8, u32>(&raw[data.face_filled_offset..]);
-
-            let mut num_faces = 0;
-            for mask in face_filled {
-                // println!("   mask: {:#08x}", mask);
-                num_faces += mask.count_ones() as usize;
-            }
-
-            let mut vertexes: Vec<Vec3> = Vec::new();
-            vertexes.resize(num_faces * VERTEXES_PER_FACE, default());
-
-            let mut filled = 0;
-            for i in 0..data.num_voxels * FACES_PER_VOXEL {
-                if face_filled[i / FACE_FILLED_NUM_BITS as usize]
-                    & (1 << (i % FACE_FILLED_NUM_BITS as usize))
-                    != 0
-                {
-                    // println!("   fill face: {:?}", i);
-                    for j in 0..VERTEXES_PER_FACE {
-                        vertexes[filled * VERTEXES_PER_FACE + j] =
-                            src_vertexes[i * VERTEXES_PER_FACE + j].xyz();
-                    }
-                    filled += 1;
-                }
-            }
-            // println!("   filled: {:?}", filled);
-            // println!("   num_faces: {:?}", num_faces);
-            assert!(filled == num_faces);
-
-            // println!("{:?}\n", src_vertexes);
-            // println!("{:?}", vertexes);
-            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertexes);
-            commands.entity(entity).insert(meshes.add(mesh));
-        }
-        *guard = GenerateMeshState::Done;
+        let state = replace(&mut *guard, GenerateMeshState::Done);
+        let GenerateMeshState::Mapped(gen_impl) = state else {
+            *guard = state;
+            continue;
+        };
+        println!("** finalize_generate_mesh");
+        let vertexes = gen_impl.get_mesh();
+        // println!("{:?}\n", src_vertexes);
+        // println!("{:?}", vertexes);
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertexes);
+        commands.entity(entity).insert(meshes.add(mesh));
     }
 }
 
@@ -264,64 +142,17 @@ pub struct GenerationPipeline {
 
 impl FromWorld for GenerationPipeline {
     fn from_world(world: &mut World) -> Self {
-        let bind_group_layout =
-            world
-                .resource::<RenderDevice>()
-                .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: None,
-                    entries: &[
-                        BindGroupLayoutEntry {
-                            binding: WGSL_MESH_BINDING,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: WGSL_FACE_FILLED_BINDING,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: WGSL_VOXEL_GRID_IN_SIZE_BINDING,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: WGSL_VOXEL_GRID_IN_BINDING,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
+        let bind_group_layout: BindGroupLayout =
+            generate_mesh_bind_group_layout(world.resource::<RenderDevice>().wgpu_device()).into();
         let shader = world.resource::<AssetServer>().load("shaders/vox.wgsl");
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: None,
+            label: Some("generate_mesh_pipeline".into()),
             layout: vec![bind_group_layout.clone()],
             push_constant_ranges: Vec::new(),
             shader,
             shader_defs: vec![],
-            entry_point: Cow::from("generate_mesh"),
+            entry_point: Cow::from(GENERATE_MESH_ENTRY_POINT),
         });
 
         GenerationPipeline {
@@ -346,32 +177,17 @@ impl render_graph::Node for GenerationNode {
         let pipeline = world.resource::<GenerationPipeline>();
         for shared_state in pipeline.states.iter() {
             let guard = shared_state.lock().unwrap();
-            let GenerateMeshState::Busy(data) = &*guard else {
+            let GenerateMeshState::Busy(gen_impl) = &*guard else {
                 continue;
             };
-            {
-                let pipeline = pipeline_cache
+            let encoder = render_context.command_encoder();
+            gen_impl.add_pass(
+                pipeline_cache
                     .get_compute_pipeline(pipeline.pipeline)
-                    .unwrap();
-                let mut pass = render_context
-                    .command_encoder()
-                    .begin_compute_pass(&ComputePassDescriptor::default());
-                pass.set_bind_group(0, &data.bind_group, &[]);
-                pass.set_pipeline(pipeline);
-                pass.dispatch_workgroups(
-                    (data.num_voxels as u32 + GENERATE_MESH_VOXELS_PER_WORKGROUP - 1)
-                        / GENERATE_MESH_VOXELS_PER_WORKGROUP,
-                    1,
-                    1,
-                );
-            }
-            render_context.command_encoder().copy_buffer_to_buffer(
-                &data.storage_buffer,
-                0,
-                &data.copy_buffer,
-                0,
-                data.buffer_size as u64,
+                    .unwrap(),
+                encoder,
             );
+            gen_impl.add_copy(encoder);
         }
 
         Ok(())

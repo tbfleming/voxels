@@ -105,4 +105,4 @@ fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
         write_face(pos_f32, face_index + 4, vox_010.material == 0u, face(p011, p111, p110, p110, p010, p011)); // y=1
         write_face(pos_f32, face_index + 5, vox_0n0.material == 0u, face(p000, p100, p101, p101, p001, p000)); // y=0
     }
-}
+} // generate_mesh
