@@ -19,22 +19,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::voxel::*;
-
-const WGSL_MESH_BINDING: u32 = 0;
-const WGSL_FACE_FILLED_BINDING: u32 = 1;
-
-const WGSL_VEC3_STRIDE: usize = size_of::<Vec4>(); // WGSL pads vec3
-const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * VERTEXES_PER_FACE;
-const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * FACES_PER_VOXEL;
-
-const VERTEXES_PER_FACE: usize = 6;
-const FACES_PER_VOXEL: usize = 6;
-const FACE_FILLED_NUM_BITS: u32 = 30;
-const GENERATE_MESH_WORKGROUP_SIZE: u32 = 64;
-const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
-const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
-    GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
+use crate::*;
 
 pub struct GenerateMeshPlugin;
 
@@ -62,7 +47,6 @@ impl Plugin for GenerateMeshPlugin {
     }
 }
 
-// lock order: VoxelGrid, GenerateMesh
 #[derive(Component, Default, Clone, Debug, TypePath, ExtractComponent)]
 #[component(storage = "SparseSet")]
 pub struct GenerateMesh(SharedGenerateMeshState);
@@ -73,6 +57,7 @@ impl GenerateMesh {
     }
 }
 
+// lock order: SharedVoxelGridBuffer, GenerateMeshState
 type SharedGenerateMeshState = Arc<Mutex<GenerateMeshState>>;
 
 #[derive(Default, Debug)]
@@ -101,9 +86,9 @@ fn prepare_generate_mesh(
     generate_meshes: Query<(&GenerateMesh, &VoxelGrid)>,
 ) {
     // println!("** prepare_generate_mesh");
-    for (generate_mesh, voxel_grid_storage_buffer) in generate_meshes.iter() {
+    for (generate_mesh, voxel_grid) in generate_meshes.iter() {
         // println!("** prepare_generate_mesh: ?");
-        let grid_buffer_guard = voxel_grid_storage_buffer.buffer.lock().unwrap();
+        let grid_buffer_guard = voxel_grid.lock().unwrap();
         let mut mesh_state_guard = generate_mesh.0.lock().unwrap();
         let Some(grid_buffer) = &*grid_buffer_guard else {
             continue;
@@ -112,12 +97,10 @@ fn prepare_generate_mesh(
             continue;
         };
         println!("** prepare_generate_mesh: Init");
-        println!("   size: {:?}", voxel_grid_storage_buffer.size);
-        println!("   grid_buffer size: {:?}", grid_buffer.size());
+        println!("   size: {:?}", grid_buffer.size);
 
-        let num_voxels = voxel_grid_storage_buffer.size.x as usize
-            * voxel_grid_storage_buffer.size.y as usize
-            * voxel_grid_storage_buffer.size.z as usize;
+        let num_voxels =
+            grid_buffer.size.x as usize * grid_buffer.size.y as usize * grid_buffer.size.z as usize;
         println!("   num_voxels: {:?}", num_voxels);
         let face_filled_offset = num_voxels * WGSL_FACES_STRIDE;
         println!("   face_filled_offset: {:?}", face_filled_offset);
@@ -144,7 +127,7 @@ fn prepare_generate_mesh(
             mapped_at_creation: true,
         });
         cast_slice_mut::<u8, UVec3>(&mut uniform_buffer.slice(..).get_mapped_range_mut())[0] =
-            voxel_grid_storage_buffer.size;
+            grid_buffer.size;
         uniform_buffer.unmap();
 
         let bind_group = render_device.create_bind_group(&BindGroupDescriptor {
@@ -178,7 +161,7 @@ fn prepare_generate_mesh(
                 BindGroupEntry {
                     binding: WGSL_VOXEL_GRID_IN_BINDING,
                     resource: BindingResource::Buffer(BufferBinding {
-                        buffer: grid_buffer,
+                        buffer: &grid_buffer.buffer,
                         offset: 0,
                         size: None,
                     }),

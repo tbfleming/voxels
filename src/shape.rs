@@ -1,8 +1,8 @@
-use crate::voxel::*;
 use bevy::prelude::UVec3;
-use std::sync::{Arc, Mutex};
 
-pub fn sphere(size: u32, material: u8) -> VoxelGridData {
+use crate::*;
+
+pub fn sphere(size: u32, material: u8) -> VoxelGridVec {
     let mut data = Vec::new();
     let size = size as i32;
     data.resize(((size + 2) * (size + 2) * (size + 2)) as usize, 0);
@@ -52,8 +52,8 @@ pub fn sphere(size: u32, material: u8) -> VoxelGridData {
         }
     }
     let size = size as u32;
-    VoxelGridData {
+    VoxelGridVec {
         size: UVec3::new(size, size, size),
-        data: Arc::new(Mutex::new(Some(data))),
+        data,
     }
 }

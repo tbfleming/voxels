@@ -1,149 +1,161 @@
-use bevy::{
-    core::cast_slice,
-    ecs::query::Has,
-    prelude::*,
-    reflect::TypePath,
-    render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
-        render_resource::*,
-        renderer::RenderDevice,
-        Render, RenderApp, RenderSet,
-    },
-};
-use std::sync::{Arc, Mutex};
+use bytemuck::cast_slice;
+use glam::{UVec3, Vec4};
+use std::mem::size_of;
+use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device};
 
 pub(crate) const WGSL_VOXEL_GRID_IN_SIZE_BINDING: u32 = 2;
 pub(crate) const WGSL_VOXEL_GRID_IN_BINDING: u32 = 3;
+pub(crate) const WGSL_MESH_BINDING: u32 = 0;
+pub(crate) const WGSL_FACE_FILLED_BINDING: u32 = 1;
 
-pub struct VoxelPlugin;
+pub(crate) const WGSL_VEC3_STRIDE: usize = size_of::<Vec4>(); // WGSL pads vec3
+pub(crate) const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * VERTEXES_PER_FACE;
+pub(crate) const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * FACES_PER_VOXEL;
 
-impl Plugin for VoxelPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_plugins(ExtractComponentPlugin::<VoxelGridData>::default());
-        app.add_plugins(ExtractComponentPlugin::<VoxelGrid>::default());
-        app.add_plugins(ExtractComponentPlugin::<CopyDataToVoxelGrid>::default());
-        app.add_systems(First, finalize_copy_data_to_voxel_grid);
+pub(crate) const VERTEXES_PER_FACE: usize = 6;
+pub(crate) const FACES_PER_VOXEL: usize = 6;
+pub(crate) const FACE_FILLED_NUM_BITS: u32 = 30;
+pub(crate) const GENERATE_MESH_WORKGROUP_SIZE: u32 = 64;
+pub(crate) const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
+pub(crate) const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
+    GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
 
-        let render_app = app.sub_app_mut(RenderApp);
-        render_app.add_systems(Render, copy_data_to_voxel_grid.in_set(RenderSet::Prepare));
-    }
-}
-
-// Each voxel is 4 bytes:
-// * Byte 0: i8: offset_x * 64
-// * Byte 1: i8: offset_y * 64
-// * Byte 2: i8: offset_z * 64
-// * Byte 3: u8: material. 0 means empty.
-//
-// The offsets modify the voxel's lower-left corner and have range (-2.0, 2.0),
-// where 1.0 is the distance between voxel centers. If an offset value is 0x80,
-// it is treated as 0x81.
-//
-// The voxels are packed by x, then y, then z. Each dimension is padded on both
-// sides by 1 voxel. The offsets at the start padding don't matter. The
-// offsets at the end padding complete the voxel bounds. Non-0 material in padding
-// excludes the faces at the edges of the voxel grid.
-//
-// lock order: VoxelGridData, VoxelGrid
-#[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
-pub struct VoxelGridData {
+/// Voxels stored in a [Vec].
+///
+/// Each voxel is 4 bytes:
+/// * Byte 0: `i8:` `offset_x * 64`
+/// * Byte 1: `i8:` `offset_y * 64`
+/// * Byte 2: `i8:` `offset_z * 64`
+/// * Byte 3: `u8:` material. 0 means empty.
+///
+/// The offsets modify the voxel's lower-left corner and have range (-2.0, 2.0),
+/// where 1.0 is the distance between voxel centers. If an offset value is 0x80,
+/// it is treated as 0x81.
+///
+/// The voxels are packed by x, then y, then z. Each dimension is padded on both
+/// sides by 1 voxel. The offsets at the start padding don't matter. The
+/// offsets at the end padding complete the voxel bounds. Non-0 material in padding
+/// excludes the faces at the edges of the voxel grid.
+///
+/// `index = (x + 1) + (y + 1) * (size.x + 2) + (z + 1) * (size.x + 2) * (size.y + 2)`,
+/// where `0,0,0` is the lower-left voxel, skipping padding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VoxelGridVec {
+    /// Size of the voxel grid, excluding padding
     pub size: UVec3,
-    pub data: Arc<Mutex<Option<Vec<u32>>>>,
+
+    /// Voxel data, including padding
+    pub data: Vec<u32>,
 }
 
-impl VoxelGridData {
-    pub fn without_data(size: UVec3) -> Self {
-        Self {
-            size,
-            data: Arc::new(Mutex::new(None)),
-        }
-    }
-
+impl VoxelGridVec {
+    /// Create a new voxel grid with the given size and material.
+    /// The size does not include padding, but the result includes
+    /// it. The Padding is filled with empty voxels.
+    ///
+    /// Panics if the size is too large.
     pub fn new(size: UVec3, material: u8) -> Self {
         let mut data = Vec::new();
-        data.resize(((size.x + 2) * (size.y + 2) * (size.z + 2)) as usize, 0);
-        for z in 0..size.z {
-            for y in 0..size.y {
-                for x in 0..size.x {
-                    data[((x + 1) + (y + 1) * (size.x + 2) + (z + 1) * (size.x + 2) * (size.y + 2))
-                        as usize] = (material as u32) << 24;
+        data.resize(get_vec_size(size), 0);
+        if material != 0 {
+            for z in 0..size.z {
+                for y in 0..size.y {
+                    for x in 0..size.x {
+                        data[voxel_index(size, x, y, z)] = (material as u32) << 24;
+                    }
                 }
             }
         }
-        Self {
-            size,
-            data: Arc::new(Mutex::new(Some(data))),
-        }
+        Self { size, data }
     }
 }
 
-// lock order: VoxelGridData, VoxelGrid
-#[derive(Component, Clone, Debug, TypePath, ExtractComponent)]
-pub struct VoxelGrid {
+fn check_grid_size(size: UVec3) -> (usize, usize) {
+    if size.x >= (i32::MAX - 2) as u32
+        || size.y >= (i32::MAX - 2) as u32
+        || size.z >= (i32::MAX - 2) as u32
+    {
+        panic!("Voxel grid size is too large");
+    }
+    let vec_size = (size.x as usize + 2) * (size.y as usize + 2) * (size.z as usize + 2);
+    let buf_size = vec_size * size_of::<u32>();
+    if buf_size >= i32::MAX as usize {
+        panic!("Voxel grid size is too large");
+    }
+    (vec_size, buf_size)
+}
+
+/// Get the length of the data vector for a voxel grid with the given size.
+/// The size does not include padding, but the returned value does.
+///
+/// Panics if the size is too large.
+pub fn get_vec_size(size: UVec3) -> usize {
+    check_grid_size(size).0
+}
+
+/// Get the length of the gpu buffer, in bytes, for a voxel grid with the given size.
+/// The size does not include padding, but the returned value does.
+///
+/// Panics if the size is too large.
+pub fn get_buf_size(size: UVec3) -> usize {
+    check_grid_size(size).1
+}
+
+/// Get the index of a voxel in the data vector. `0,0,0` gets the first voxel,
+/// skipping the padding. `size.<c>` for coordinate `c` (x, y, or z) gets ending padding.
+///
+/// This function doesn't check for out-of-bounds coordinates.
+pub fn voxel_index(size: UVec3, x: u32, y: u32, z: u32) -> usize {
+    ((x + 1) + (y + 1) * (size.x + 2) + (z + 1) * (size.x + 2) * (size.y + 2)) as usize
+}
+
+/// Get the index of a voxel in the data vector. `0,0,0` gets the first voxel,
+/// skipping the padding. -1 for any coordinate gets beginning padding.
+/// `size.<c>` for coordinate `c` (x, y, or z) gets ending padding.
+///
+/// This function doesn't check for out-of-bounds coordinates.
+pub fn voxel_index_i32(size: UVec3, x: i32, y: i32, z: i32) -> usize {
+    ((x + 1) + (y + 1) * (size.x as i32 + 2) + (z + 1) * (size.x as i32 + 2) * (size.y as i32 + 2))
+        as usize
+}
+
+/// Voxels readable and writable by the GPU. See [VoxelGridContent] for the format.
+#[derive(Debug)]
+pub struct VoxelGridBuffer {
+    /// Size of the voxel grid, excluding padding
     pub size: UVec3,
-    pub buffer: Arc<Mutex<Option<Buffer>>>,
+
+    /// Voxel data, including padding. Usage flags are
+    /// `[BufferUsages::STORAGE] | [BufferUsages::COPY_SRC]`.
+    pub buffer: Buffer,
 }
 
-impl VoxelGrid {
-    pub fn new(size: UVec3) -> Self {
+impl VoxelGridBuffer {
+    /// Create a new voxel grid with the given size. The size does
+    /// not include padding, but the result includes it.
+    ///
+    /// Panics if the size is too large.
+    pub fn new(size: UVec3, device: &Device, mapped_at_creation: bool) -> Self {
         Self {
             size,
-            buffer: default(),
+            buffer: device.create_buffer(&BufferDescriptor {
+                label: Some("voxel_grid_buffer"),
+                size: get_buf_size(size) as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                mapped_at_creation,
+            }),
         }
     }
-}
 
-#[derive(Component, Default, Clone, Debug, TypePath, ExtractComponent)]
-#[component(storage = "SparseSet")]
-pub struct CopyDataToVoxelGrid;
-
-fn copy_data_to_voxel_grid(
-    render_device: Res<RenderDevice>,
-    query: Query<(&VoxelGridData, &VoxelGrid), Has<CopyDataToVoxelGrid>>,
-) {
-    for (voxel_grid_data, voxel_grid_storage_buffer) in query.iter() {
-        if voxel_grid_data.size != voxel_grid_storage_buffer.size {
-            println!("** copy_data_to_storage: size mismatch");
-            continue;
-        }
-        let data = voxel_grid_data.data.lock().unwrap();
-        let mut buffer = voxel_grid_storage_buffer.buffer.lock().unwrap();
-        if buffer.is_some() {
-            continue;
-        }
-        let Some(data) = &*data else {
-            println!("** copy_data_to_storage: no data");
-            continue;
-        };
-        println!("** copy_data_to_storage");
-        let storage_buffer = render_device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: (data.len() * 4) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
-        storage_buffer
+    /// Create a new voxel grid and copy the given content into it.
+    pub fn from_content(content: &VoxelGridVec, device: &Device) -> Self {
+        let buffer = Self::new(content.size, device, true);
+        buffer
+            .buffer
             .slice(..)
             .get_mapped_range_mut()
-            .copy_from_slice(cast_slice::<u32, u8>(data));
-        // println!("{:?}\n=====", data);
-        // println!(
-        //     "{:?}",
-        //     cast_slice::<u8, u32>(&storage_buffer.slice(..).get_mapped_range())
-        // );
-        storage_buffer.unmap();
-        *buffer = Some(storage_buffer);
-    }
-}
-
-fn finalize_copy_data_to_voxel_grid(
-    mut commands: Commands,
-    query: Query<(Entity, &VoxelGrid), Has<CopyDataToVoxelGrid>>,
-) {
-    for (entity, voxel_grid_storage_buffer) in query.iter() {
-        let buffer = voxel_grid_storage_buffer.buffer.lock().unwrap();
-        if buffer.is_some() {
-            commands.entity(entity).remove::<CopyDataToVoxelGrid>();
-        }
+            .copy_from_slice(cast_slice::<u32, u8>(&content.data));
+        buffer.buffer.unmap();
+        buffer
     }
 }
