@@ -71,10 +71,16 @@ fn setup(
         VoxelGrid::new(),
         GenerateMesh::new(),
     ));
-    commands.spawn(PointLightBundle {
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
+    commands.spawn(DirectionalLightBundle {
+        transform: Transform::from_xyz(3.5 + 20.0, 2.5 + 20.0, 5.0 + 20.0)
+            .looking_at(Vec3::ZERO, Vec3::Y),
         ..default()
     });
+    commands.insert_resource(AmbientLight {
+        color: default(),
+        brightness: 0.4,
+    });
+
     commands.spawn((
         Camera3dBundle {
             transform: Transform::from_xyz(3.5 + 20.0, 2.5 + 20.0, 5.0 + 20.0)
