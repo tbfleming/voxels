@@ -124,11 +124,12 @@ fn finalize_generate_mesh(
             continue;
         };
         println!("** finalize_generate_mesh");
-        let vertexes = gen_impl.get_mesh();
+        let (vertexes, normals) = gen_impl.get_mesh();
         // println!("{:?}\n", src_vertexes);
         // println!("{:?}", vertexes);
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertexes);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         commands.entity(entity).insert(meshes.add(mesh));
     }
 }

@@ -1,8 +1,29 @@
 alias face = array<vec3<f32>, 6>;
 
-// Each voxel face is 6 vertices (2 triangles)
 @group(0) @binding(0)
+var<uniform> voxel_grid_a_size: vec3<u32>;
+
+@group(0) @binding(1)
+var<storage,read> voxel_grid_a: array<u32>;
+
+@group(0) @binding(2)
+var<uniform> voxel_grid_b_size: vec3<u32>;
+
+@group(0) @binding(3)
+var<storage,read> voxel_grid_b: array<u32>;
+
+@group(0) @binding(4)
+var<uniform> voxel_grid_out_size: vec3<u32>;
+
+@group(0) @binding(5)
+var<storage,read_write> voxel_grid_out: array<u32>;
+
+// Each voxel face is 6 vertices (2 triangles)
+@group(0) @binding(6)
 var<storage,read_write> mesh: array<vec3<f32>>;
+
+@group(0) @binding(7)
+var<storage,read_write> mesh_normals: array<vec3<f32>>;
 
 // Each bit in face_filled represents a face. If the bit is set, the face is filled.
 // The 30 LSBs of face_filled[0] represent the first 30 faces.
@@ -15,14 +36,8 @@ var<storage,read_write> mesh: array<vec3<f32>>;
 //
 // The order of faces within voxels, and the order of voxels within (face_filled
 // and mesh) may change in the future; consumers shouldn't rely on it.
-@group(0) @binding(1)
+@group(0) @binding(8)
 var<storage,read_write> face_filled: array<u32>;
-
-@group(0) @binding(2)
-var<uniform> voxel_grid_in_size: vec3<u32>;
-
-@group(0) @binding(3)
-var<storage,read> voxel_grid_in: array<u32>;
 
 struct voxel {
     corner: vec3<f32>,
@@ -32,9 +47,9 @@ struct voxel {
 fn read_voxel(pos: vec3<i32>) -> voxel {
     let index = //
         (pos.x + 1) + //
-        (pos.y + 1) * i32(voxel_grid_in_size.x + 2u) + //
-        (pos.z + 1) * i32((voxel_grid_in_size.x + 2u) * (voxel_grid_in_size.y + 2u));
-    let raw = voxel_grid_in[index];
+        (pos.y + 1) * i32(voxel_grid_a_size.x + 2u) + //
+        (pos.z + 1) * i32((voxel_grid_a_size.x + 2u) * (voxel_grid_a_size.y + 2u));
+    let raw = voxel_grid_a[index];
     let unpacked = unpack4x8snorm(raw);
     return voxel(vec3<f32>(
         unpacked.x * 127.0 / 64.0,
@@ -52,6 +67,15 @@ fn write_face(pos: vec3<f32>, index: i32, filled: bool, face: face) {
         mesh[index * 6 + 3] = pos + face[3];
         mesh[index * 6 + 4] = pos + face[4];
         mesh[index * 6 + 5] = pos + face[5];
+
+        let normal0 = normalize(cross(face[1] - face[0], face[2] - face[0]));
+        let normal1 = normalize(cross(face[4] - face[3], face[5] - face[3]));
+        mesh_normals[index * 6 + 0] = normal0;
+        mesh_normals[index * 6 + 1] = normal0;
+        mesh_normals[index * 6 + 2] = normal0;
+        mesh_normals[index * 6 + 3] = normal1;
+        mesh_normals[index * 6 + 4] = normal1;
+        mesh_normals[index * 6 + 5] = normal1;
     }
 }
 
@@ -61,14 +85,14 @@ fn write_face(pos: vec3<f32>, index: i32, filled: bool, face: face) {
 fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
     for (var i = 0u; i < 5u; i += 1u) {
         let voxel_index = invocation.x * 5u + i;
-        if voxel_index >= voxel_grid_in_size.x * voxel_grid_in_size.y * voxel_grid_in_size.z {
+        if voxel_index >= voxel_grid_a_size.x * voxel_grid_a_size.y * voxel_grid_a_size.z {
             break;
         }
         let face_index = i32(voxel_index) * 6;
         let pos_u32 = vec3(
-            voxel_index % voxel_grid_in_size.x,
-            (voxel_index / voxel_grid_in_size.x) % voxel_grid_in_size.y,
-            voxel_index / (voxel_grid_in_size.x * voxel_grid_in_size.y)
+            voxel_index % voxel_grid_a_size.x,
+            (voxel_index / voxel_grid_a_size.x) % voxel_grid_a_size.y,
+            voxel_index / (voxel_grid_a_size.x * voxel_grid_a_size.y)
         );
         let pos_i32 = vec3<i32>(pos_u32);
         let pos_f32 = vec3<f32>(pos_u32);
@@ -84,7 +108,6 @@ fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
         let vox_101 = read_voxel(pos_i32 + vec3<i32>(1, 0, 1));
         let vox_110 = read_voxel(pos_i32 + vec3<i32>(1, 1, 0));
         let vox_111 = read_voxel(pos_i32 + vec3<i32>(1, 1, 1));
-
         let vox_00n = read_voxel(pos_i32 + vec3<i32>(0, 0, -1));
         let vox_0n0 = read_voxel(pos_i32 + vec3<i32>(0, -1, 0));
         let vox_n00 = read_voxel(pos_i32 + vec3<i32>(-1, 0, 0));

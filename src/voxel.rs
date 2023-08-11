@@ -10,10 +10,11 @@ use wgpu::{
 
 pub const GENERATE_MESH_ENTRY_POINT: &str = "generate_mesh";
 
-pub(crate) const WGSL_VOXEL_GRID_IN_SIZE_BINDING: u32 = 2;
-pub(crate) const WGSL_VOXEL_GRID_IN_BINDING: u32 = 3;
-pub(crate) const WGSL_MESH_BINDING: u32 = 0;
-pub(crate) const WGSL_FACE_FILLED_BINDING: u32 = 1;
+pub(crate) const WGSL_VOXEL_GRID_A_SIZE_BINDING: u32 = 0;
+pub(crate) const WGSL_VOXEL_GRID_A_BINDING: u32 = 1;
+pub(crate) const WGSL_MESH_BINDING: u32 = 6;
+pub(crate) const WGSL_MESH_NORMALS_BINDING: u32 = 7;
+pub(crate) const WGSL_FACE_FILLED_BINDING: u32 = 8;
 
 pub(crate) const WGSL_VEC3_STRIDE: usize = size_of::<Vec4>(); // WGSL pads vec3
 pub(crate) const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * VERTEXES_PER_FACE;
@@ -173,7 +174,7 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
         label: Some("generate_mesh_bind_group_layout"),
         entries: &[
             BindGroupLayoutEntry {
-                binding: WGSL_VOXEL_GRID_IN_SIZE_BINDING,
+                binding: WGSL_VOXEL_GRID_A_SIZE_BINDING,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
@@ -183,7 +184,7 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
                 count: None,
             },
             BindGroupLayoutEntry {
-                binding: WGSL_VOXEL_GRID_IN_BINDING,
+                binding: WGSL_VOXEL_GRID_A_BINDING,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Storage { read_only: true },
@@ -194,6 +195,16 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
             },
             BindGroupLayoutEntry {
                 binding: WGSL_MESH_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: WGSL_MESH_NORMALS_BINDING,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Storage { read_only: false },
@@ -232,6 +243,9 @@ pub struct GenerateMeshImpl {
     // Excludes padding
     num_voxels: usize,
 
+    // Offset of normals in storage_buffer
+    normals_offset: usize,
+
     // Offset of face_filled in storage_buffer
     face_filled_offset: usize,
 
@@ -247,6 +261,10 @@ pub struct GenerateMeshImpl {
     bind_group: BindGroup,
 }
 
+pub fn vec4_to_3(v: &Vec4) -> Vec3 {
+    Vec3::new(v.x, v.y, v.z)
+}
+
 impl GenerateMeshImpl {
     /// Create buffers and bind group
     pub fn new(
@@ -257,7 +275,8 @@ impl GenerateMeshImpl {
         let num_voxels =
             grid_buffer.size.x as usize * grid_buffer.size.y as usize * grid_buffer.size.z as usize;
         println!("   num_voxels: {:?}", num_voxels);
-        let face_filled_offset = num_voxels * WGSL_FACES_STRIDE;
+        let normals_offset = num_voxels * WGSL_FACES_STRIDE;
+        let face_filled_offset = normals_offset + num_voxels * WGSL_FACES_STRIDE;
         println!("   face_filled_offset: {:?}", face_filled_offset);
         let num_faces = num_voxels * FACES_PER_VOXEL;
         let buffer_size = face_filled_offset
@@ -295,7 +314,15 @@ impl GenerateMeshImpl {
                     resource: BindingResource::Buffer(BufferBinding {
                         buffer: &storage_buffer,
                         offset: 0,
-                        size: NonZeroU64::new(face_filled_offset as u64),
+                        size: NonZeroU64::new(normals_offset as u64),
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_MESH_NORMALS_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &storage_buffer,
+                        offset: normals_offset as u64,
+                        size: NonZeroU64::new((face_filled_offset - normals_offset) as u64),
                     }),
                 },
                 BindGroupEntry {
@@ -307,7 +334,7 @@ impl GenerateMeshImpl {
                     }),
                 },
                 BindGroupEntry {
-                    binding: WGSL_VOXEL_GRID_IN_SIZE_BINDING,
+                    binding: WGSL_VOXEL_GRID_A_SIZE_BINDING,
                     resource: BindingResource::Buffer(BufferBinding {
                         buffer: &uniform_buffer,
                         offset: 0,
@@ -315,7 +342,7 @@ impl GenerateMeshImpl {
                     }),
                 },
                 BindGroupEntry {
-                    binding: WGSL_VOXEL_GRID_IN_BINDING,
+                    binding: WGSL_VOXEL_GRID_A_BINDING,
                     resource: BindingResource::Buffer(BufferBinding {
                         buffer: &grid_buffer.buffer,
                         offset: 0,
@@ -327,6 +354,7 @@ impl GenerateMeshImpl {
 
         Self {
             num_voxels,
+            normals_offset,
             face_filled_offset,
             buffer_size,
             storage_buffer,
@@ -370,10 +398,12 @@ impl GenerateMeshImpl {
             .map_async(MapMode::Read, |result| done(self, result));
     }
 
-    /// Get the mesh from the copy buffer
-    pub fn get_mesh(self) -> Vec<Vec3> {
+    /// Get the mesh and normals from the copy buffer
+    pub fn get_mesh(self) -> (Vec<Vec3>, Vec<Vec3>) {
         let raw = self.copy_buffer.slice(..).get_mapped_range();
-        let src_vertexes = cast_slice::<u8, Vec4>(&raw[..self.face_filled_offset]);
+        let src_vertexes = cast_slice::<u8, Vec4>(&raw[..self.normals_offset]);
+        let src_normals =
+            cast_slice::<u8, Vec4>(&raw[self.normals_offset..self.face_filled_offset]);
         let face_filled = cast_slice::<u8, u32>(&raw[self.face_filled_offset..]);
 
         let mut num_faces = 0;
@@ -383,7 +413,9 @@ impl GenerateMeshImpl {
         }
 
         let mut vertexes: Vec<Vec3> = Vec::new();
+        let mut normals: Vec<Vec3> = Vec::new();
         vertexes.resize(num_faces * VERTEXES_PER_FACE, Default::default());
+        normals.resize(num_faces * VERTEXES_PER_FACE, Default::default());
 
         let mut filled = 0;
         for i in 0..self.num_voxels * FACES_PER_VOXEL {
@@ -394,11 +426,10 @@ impl GenerateMeshImpl {
                 // println!("   fill face: {:?}", i);
                 for j in 0..VERTEXES_PER_FACE {
                     let v = src_vertexes[i * VERTEXES_PER_FACE + j];
-                    vertexes[filled * VERTEXES_PER_FACE + j] = Vec3 {
-                        x: v.x,
-                        y: v.y,
-                        z: v.z,
-                    };
+                    vertexes[filled * VERTEXES_PER_FACE + j] = vec4_to_3(&v);
+
+                    let n = src_normals[i * VERTEXES_PER_FACE + j];
+                    normals[filled * VERTEXES_PER_FACE + j] = vec4_to_3(&n);
                 }
                 filled += 1;
             }
@@ -406,6 +437,6 @@ impl GenerateMeshImpl {
         // println!("   filled: {:?}", filled);
         // println!("   num_faces: {:?}", num_faces);
         assert!(filled == num_faces);
-        vertexes
+        (vertexes, normals)
     }
 }

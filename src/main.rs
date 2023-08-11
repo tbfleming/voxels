@@ -60,7 +60,7 @@ fn setup(
     commands.spawn((
         PbrBundle {
             mesh: meshes.add(mesh),
-            material: materials.add(Color::rgba(0.0, 0.7, 0.7, 0.0).into()),
+            material: materials.add(Color::rgba(0.0, 0.7, 0.7, 1.0).into()),
             transform: Transform::from_xyz(0.0, 0.5, 0.0),
             ..default()
         },
