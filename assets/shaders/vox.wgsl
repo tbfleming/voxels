@@ -1,10 +1,18 @@
 alias face = array<vec3<f32>, 6>;
 
+const PASTE_MATERIAL        = 1u;  // Copy material of occupied voxels
+const PASTE_MATERIAL_ARG    = 2u;  // Set material of occupied voxels to args.material
+const PASTE_VERTEXES        = 4u;  // Copy vertexes on the corners of occupied voxels
+
 // Arguments for shaders. See each entry point for details.
 struct args_t {
     a_size: vec3<u32>,
     b_size: vec3<u32>,
     out_size: vec3<u32>,
+    offset: vec3<i32>,
+    flags: u32,
+    material: u32,
+    diameter: u32,
 }
 
 @group(0) @binding(0)
@@ -171,3 +179,102 @@ fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
         write_face(pos_f32, face_index + 5, vox_0n0.material == 0u, face(p000, p100, p101, p101, p001, p000)); // y=0
     }
 } // generate_mesh
+
+struct paste_state {
+    src_size: vec3<u32>,
+    src_pos: vec3<i32>,
+    dest_pos: vec3<i32>,
+    raw: u32,
+}
+
+fn paste_begin(voxel_index: i32, state: ptr<function, paste_state>) -> bool {
+    // Include ending padding from source so we get all vertexes
+    let scan_size = vec3(i32((*state).src_size.x) + 1, i32((*state).src_size.y) + 1, i32((*state).src_size.z) + 1);
+    if voxel_index >= scan_size.x * scan_size.y * scan_size.z {
+        return false;
+    }
+    (*state).src_pos = vec3(
+        voxel_index % scan_size.x,
+        (voxel_index / scan_size.x) % scan_size.y,
+        voxel_index / (scan_size.x * scan_size.y)
+    );
+    (*state).dest_pos = (*state).src_pos + args.offset;
+
+    // Skip if dest is out of bounds. Allow ending padding.
+    if (*state).dest_pos.x < 0 || (*state).dest_pos.y < 0 || (*state).dest_pos.z < 0 || //
+        (*state).dest_pos.x > i32(args.out_size.x) || //
+        (*state).dest_pos.y > i32(args.out_size.y) || //
+        (*state).dest_pos.z > i32(args.out_size.z) {
+        return false;
+    }
+
+    (*state).raw = voxel_grid_out[index(args.out_size, (*state).dest_pos)];
+    return true;
+}
+
+// Paste material if both source and dest aren't in padding
+fn paste_material(state: ptr<function, paste_state>, src_mat: u32) {
+    if (*state).src_pos.x < i32((*state).src_size.x) && //
+       (*state).src_pos.y < i32((*state).src_size.y) && //
+       (*state).src_pos.z < i32((*state).src_size.z) && //
+       (*state).dest_pos.x < i32(args.out_size.x) && //
+       (*state).dest_pos.y < i32(args.out_size.y) && //
+       (*state).dest_pos.z < i32(args.out_size.z) {
+        if (args.flags & PASTE_MATERIAL_ARG) != 0u {
+            (*state).raw = ((*state).raw & 0x00ffffffu) | (args.material << 24u);
+        } else if (args.flags & PASTE_MATERIAL) != 0u {
+            (*state).raw = ((*state).raw & 0x00ffffffu) | (src_mat << 24u);
+        }
+    }
+}
+
+fn paste_vertex(state: ptr<function, paste_state>, src_raw: u32) {
+    (*state).raw = ((*state).raw & 0xff000000u) | (src_raw & 0x00ffffffu);
+}
+
+fn sphere_inside(pos: vec3<i32>, size: u32) -> bool {
+    let r = f32(size) / 2.0;
+    let d = vec3(f32(pos.x) + 0.5 - r, f32(pos.y) + 0.5 - r, f32(pos.z) + 0.5 - r);
+    return d.x * d.x + d.y * d.y + d.z * d.z < r * r;
+}
+
+fn sphere_include_vertex(pos: vec3<i32>, size: u32) -> bool {
+    let count = //
+        u32(sphere_inside(pos + vec3(-1, -1, -1), size)) + //
+        u32(sphere_inside(pos + vec3(-1, -1, 0), size)) + //
+        u32(sphere_inside(pos + vec3(-1, 0, -1), size)) + //
+        u32(sphere_inside(pos + vec3(-1, 0, 0), size)) + //
+        u32(sphere_inside(pos + vec3(0, -1, -1), size)) + //
+        u32(sphere_inside(pos + vec3(0, -1, 0), size)) + //
+        u32(sphere_inside(pos + vec3(0, 0, -1), size)) + //
+        u32(sphere_inside(pos + vec3(0, 0, 0), size));
+    return count != 0u && count != 8u;
+}
+
+// Paste sphere into voxel_grid_out. The sphere will be centered on
+// (args.offset + vec3(diameter/2, diameter/2, diameter/2)).
+//
+// args: {
+//     out_size:    size of voxel_grid_out
+//     offset:      offset sphere's coordinates
+//     flags:       Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
+//                  Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
+//     material:    material to paste
+//     diameter:    diameter of sphere
+// }
+//
+// This needs ceil(((args.diameter.x+1) * (args.diameter.y+1) * (args.diameter.z+1)) / 64) workgroups.
+@compute @workgroup_size(64)
+fn paste_sphere(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    var state = paste_state(vec3(args.diameter, args.diameter, args.diameter), vec3(0, 0, 0), vec3(0, 0, 0), 0u);
+    if !paste_begin(i32(invocation.x), &state) {
+        return;
+    }
+    if sphere_inside(state.src_pos, args.diameter) {
+        paste_material(&state, args.material);
+    }
+    if sphere_include_vertex(state.src_pos, args.diameter) {
+        // !!! calc vertex
+        paste_vertex(&state, 0u);
+    }
+}

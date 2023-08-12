@@ -12,6 +12,7 @@ pub const GENERATE_MESH_ENTRY_POINT: &str = "generate_mesh";
 
 pub mod unstable {
     use bytemuck::{Pod, Zeroable};
+    use glam::IVec3;
 
     use super::*;
 
@@ -24,6 +25,12 @@ pub mod unstable {
         pub _padding1: u32,
         pub out_size: UVec3,
         pub _padding2: u32,
+        pub offset: IVec3,
+        pub _padding3: u32,
+        pub flags: u32,
+        pub material: u32,
+        pub diameter: u32,
+        pub _padding4: u32,
     }
 
     pub const WGSL_ARGS_BINDING: u32 = 0;
@@ -45,6 +52,10 @@ pub mod unstable {
     pub const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
     pub const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
         GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
+
+    pub const PASTE_MATERIAL_FLAG: u32 = 1;
+    pub const PASTE_MATERIAL_ARG_FLAG: u32 = 2;
+    pub const PASTE_VERTEXES_FLAG: u32 = 4;
 }
 
 use unstable::*;
