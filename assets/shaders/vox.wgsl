@@ -212,12 +212,9 @@ fn paste_begin(voxel_index: i32, state: ptr<function, paste_state>) -> bool {
     return true;
 }
 
-// Paste material if both source and dest aren't in padding
+// Paste material if dest isn't in padding
 fn paste_material(state: ptr<function, paste_state>, src_mat: u32) {
-    if (*state).src_pos.x < i32((*state).src_size.x) && //
-       (*state).src_pos.y < i32((*state).src_size.y) && //
-       (*state).src_pos.z < i32((*state).src_size.z) && //
-       (*state).dest_pos.x < i32(args.out_size.x) && //
+    if (*state).dest_pos.x < i32(args.out_size.x) && //
        (*state).dest_pos.y < i32(args.out_size.y) && //
        (*state).dest_pos.z < i32(args.out_size.z) {
         if (args.flags & PASTE_MATERIAL_ARG) != 0u {
@@ -251,6 +248,24 @@ fn sphere_include_vertex(pos: vec3<i32>, size: u32) -> bool {
     return count != 0u && count != 8u;
 }
 
+fn sphere_vertex_center_dist(pos: vec3<i32>, r: f32) -> f32 {
+    let d = vec3(f32(pos.x) - r, f32(pos.y) - r, f32(pos.z) - r);
+    return sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+}
+
+fn sphere_vertex_delta(p: i32, r: f32, factor: f32) -> u32 {
+    return u32(i32(clamp(round(((f32(p) - r) * factor + r - f32(p)) * 64.0), -127.0, 127.0))) & 0xffu;
+}
+
+fn sphere_vertex(pos: vec3<i32>, size: u32) -> u32 {
+    let r = f32(size) / 2.0;
+    let factor = r / sphere_vertex_center_dist(pos, r);
+    return
+        sphere_vertex_delta(pos.x, r, factor) | //
+        (sphere_vertex_delta(pos.y, r, factor) << 8u) | //
+        (sphere_vertex_delta(pos.z, r, factor) << 16u);
+}
+
 // Paste sphere into voxel_grid_out. The sphere will be centered on
 // (args.offset + vec3(diameter/2, diameter/2, diameter/2)).
 //
@@ -274,7 +289,6 @@ fn paste_sphere(@builtin(global_invocation_id) invocation: vec3<u32>) {
         paste_material(&state, args.material);
     }
     if sphere_include_vertex(state.src_pos, args.diameter) {
-        // !!! calc vertex
-        paste_vertex(&state, 0u);
+        paste_vertex(&state, sphere_vertex(state.src_pos, args.diameter));
     }
 }
