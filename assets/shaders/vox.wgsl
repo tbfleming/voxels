@@ -1,29 +1,26 @@
 alias face = array<vec3<f32>, 6>;
 
-@group(0) @binding(0)
-var<uniform> voxel_grid_a_size: vec3<u32>;
+// Arguments for shaders. See each entry point for details.
+struct args_t {
+    a_size: vec3<u32>,
+    b_size: vec3<u32>,
+    out_size: vec3<u32>,
+}
 
+@group(0) @binding(0)
+var<uniform> args: args_t;
+
+// See VoxelGridVec for format
 @group(0) @binding(1)
 var<storage,read> voxel_grid_a: array<u32>;
 
+// See VoxelGridVec for format
 @group(0) @binding(2)
-var<uniform> voxel_grid_b_size: vec3<u32>;
-
-@group(0) @binding(3)
 var<storage,read> voxel_grid_b: array<u32>;
 
-@group(0) @binding(4)
-var<uniform> voxel_grid_out_size: vec3<u32>;
-
-@group(0) @binding(5)
+// See VoxelGridVec for format
+@group(0) @binding(3)
 var<storage,read_write> voxel_grid_out: array<u32>;
-
-// Each voxel face is 6 vertices (2 triangles)
-@group(0) @binding(6)
-var<storage,read_write> mesh: array<vec3<f32>>;
-
-@group(0) @binding(7)
-var<storage,read_write> mesh_normals: array<vec3<f32>>;
 
 // Each bit in face_filled represents a face. If the bit is set, the face is filled.
 // The 30 LSBs of face_filled[0] represent the first 30 faces.
@@ -35,27 +32,62 @@ var<storage,read_write> mesh_normals: array<vec3<f32>>;
 // than using atomics, but wgpu/naga doesn't support atomics in wgsl yet.
 //
 // The order of faces within voxels, and the order of voxels within (face_filled
-// and mesh) may change in the future; consumers shouldn't rely on it.
-@group(0) @binding(8)
+// and mesh) may change; consumers shouldn't rely on it.
+@group(0) @binding(4)
 var<storage,read_write> face_filled: array<u32>;
+
+// Each voxel face is 6 vertices (2 triangles)
+@group(0) @binding(5)
+var<storage,read_write> mesh: array<vec3<f32>>;
+
+@group(0) @binding(6)
+var<storage,read_write> mesh_normals: array<vec3<f32>>;
 
 struct voxel {
     corner: vec3<f32>,
     material: u32,
 }
 
-fn read_voxel(pos: vec3<i32>) -> voxel {
-    let index = //
-        (pos.x + 1) + //
-        (pos.y + 1) * i32(voxel_grid_a_size.x + 2u) + //
-        (pos.z + 1) * i32((voxel_grid_a_size.x + 2u) * (voxel_grid_a_size.y + 2u));
-    let raw = voxel_grid_a[index];
+// Calculate the index of a voxel in a voxel grid. Skips begining padding, but -1 can get to it.
+fn index(size: vec3<u32>, pos: vec3<i32>) -> i32 {
+    return (pos.x + 1) + (pos.y + 1) * i32(size.x + 2u) + (pos.z + 1) * i32((size.x + 2u) * (size.y + 2u));
+}
+
+// Pack a voxel into a u32
+fn pack(v: voxel) -> u32 {
+    let packed = pack4x8snorm(vec4(
+        v.corner.x / 127.0 * 64.0,
+        v.corner.y / 127.0 * 64.0,
+        v.corner.z / 127.0 * 64.0,
+        0.0
+    ));
+    return (packed & 0x00ffffffu) | (v.material << 24u);
+}
+
+// Unpack a voxel from a u32
+fn unpack(raw: u32) -> voxel {
     let unpacked = unpack4x8snorm(raw);
     return voxel(vec3<f32>(
         unpacked.x * 127.0 / 64.0,
         unpacked.y * 127.0 / 64.0,
         unpacked.z * 127.0 / 64.0
     ), raw >> 24u);
+}
+
+fn raw_voxel_a(pos: vec3<i32>) -> u32 {
+    return voxel_grid_a[index(args.a_size, pos)];
+}
+
+fn filled(raw: u32) -> bool {
+    return (raw & 0xff000000u) != 0u;
+}
+
+fn unpack_voxel_a(pos: vec3<i32>) -> voxel {
+    return unpack(raw_voxel_a(pos));
+}
+
+fn write_voxel_out(pos: vec3<i32>, v: voxel) {
+    voxel_grid_out[index(args.out_size, pos)] = pack(v);
 }
 
 fn write_face(pos: vec3<f32>, index: i32, filled: bool, face: face) {
@@ -79,38 +111,48 @@ fn write_face(pos: vec3<f32>, index: i32, filled: bool, face: face) {
     }
 }
 
+// Generate mesh from voxel_grid_a. Fills face_filled, mesh, and mesh_normals.
+// face_filled must be 0-initialized before calling this; mesh and mesh_normals
+// don't need to be initialized.
+//
+// args: {
+//      a_size:   size of voxel_grid_a
+// }
+//
 // Each invocation converts 5 voxels (30 faces) and fills 1 entry of face_filled.
 // Each workgroup converts a little more than a 6*7*7 cube of voxels.
+//
+// This needs ceil((args.a_size.x * args.a_size.y * args.a_size.z) / 64) workgroups.
 @compute @workgroup_size(64)
 fn generate_mesh(@builtin(global_invocation_id) invocation: vec3<u32>) {
     for (var i = 0u; i < 5u; i += 1u) {
         let voxel_index = invocation.x * 5u + i;
-        if voxel_index >= voxel_grid_a_size.x * voxel_grid_a_size.y * voxel_grid_a_size.z {
+        if voxel_index >= args.a_size.x * args.a_size.y * args.a_size.z {
             break;
         }
         let face_index = i32(voxel_index) * 6;
         let pos_u32 = vec3(
-            voxel_index % voxel_grid_a_size.x,
-            (voxel_index / voxel_grid_a_size.x) % voxel_grid_a_size.y,
-            voxel_index / (voxel_grid_a_size.x * voxel_grid_a_size.y)
+            voxel_index % args.a_size.x,
+            (voxel_index / args.a_size.x) % args.a_size.y,
+            voxel_index / (args.a_size.x * args.a_size.y)
         );
         let pos_i32 = vec3<i32>(pos_u32);
         let pos_f32 = vec3<f32>(pos_u32);
 
-        let vox_000 = read_voxel(pos_i32 + vec3<i32>(0, 0, 0));
+        let vox_000 = unpack_voxel_a(pos_i32 + vec3<i32>(0, 0, 0));
         if vox_000.material == 0u {
             continue;
         }
-        let vox_001 = read_voxel(pos_i32 + vec3<i32>(0, 0, 1));
-        let vox_010 = read_voxel(pos_i32 + vec3<i32>(0, 1, 0));
-        let vox_011 = read_voxel(pos_i32 + vec3<i32>(0, 1, 1));
-        let vox_100 = read_voxel(pos_i32 + vec3<i32>(1, 0, 0));
-        let vox_101 = read_voxel(pos_i32 + vec3<i32>(1, 0, 1));
-        let vox_110 = read_voxel(pos_i32 + vec3<i32>(1, 1, 0));
-        let vox_111 = read_voxel(pos_i32 + vec3<i32>(1, 1, 1));
-        let vox_00n = read_voxel(pos_i32 + vec3<i32>(0, 0, -1));
-        let vox_0n0 = read_voxel(pos_i32 + vec3<i32>(0, -1, 0));
-        let vox_n00 = read_voxel(pos_i32 + vec3<i32>(-1, 0, 0));
+        let vox_001 = unpack_voxel_a(pos_i32 + vec3<i32>(0, 0, 1));
+        let vox_010 = unpack_voxel_a(pos_i32 + vec3<i32>(0, 1, 0));
+        let vox_011 = unpack_voxel_a(pos_i32 + vec3<i32>(0, 1, 1));
+        let vox_100 = unpack_voxel_a(pos_i32 + vec3<i32>(1, 0, 0));
+        let vox_101 = unpack_voxel_a(pos_i32 + vec3<i32>(1, 0, 1));
+        let vox_110 = unpack_voxel_a(pos_i32 + vec3<i32>(1, 1, 0));
+        let vox_111 = unpack_voxel_a(pos_i32 + vec3<i32>(1, 1, 1));
+        let vox_00n = unpack_voxel_a(pos_i32 + vec3<i32>(0, 0, -1));
+        let vox_0n0 = unpack_voxel_a(pos_i32 + vec3<i32>(0, -1, 0));
+        let vox_n00 = unpack_voxel_a(pos_i32 + vec3<i32>(-1, 0, 0));
 
         let p000 = vec3<f32>(0.0, 0.0, 0.0) + vox_000.corner;
         let p001 = vec3<f32>(0.0, 0.0, 1.0) + vox_001.corner;

@@ -1,4 +1,4 @@
-use bytemuck::{cast_slice, cast_slice_mut};
+use bytemuck::{cast_slice, checked::from_bytes_mut};
 use glam::{UVec3, Vec3, Vec4};
 use std::{mem::size_of, num::NonZeroU64, sync::Arc};
 use wgpu::{
@@ -10,23 +10,44 @@ use wgpu::{
 
 pub const GENERATE_MESH_ENTRY_POINT: &str = "generate_mesh";
 
-pub(crate) const WGSL_VOXEL_GRID_A_SIZE_BINDING: u32 = 0;
-pub(crate) const WGSL_VOXEL_GRID_A_BINDING: u32 = 1;
-pub(crate) const WGSL_MESH_BINDING: u32 = 6;
-pub(crate) const WGSL_MESH_NORMALS_BINDING: u32 = 7;
-pub(crate) const WGSL_FACE_FILLED_BINDING: u32 = 8;
+pub mod unstable {
+    use bytemuck::{Pod, Zeroable};
 
-pub(crate) const WGSL_VEC3_STRIDE: usize = size_of::<Vec4>(); // WGSL pads vec3
-pub(crate) const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * VERTEXES_PER_FACE;
-pub(crate) const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * FACES_PER_VOXEL;
+    use super::*;
 
-pub(crate) const VERTEXES_PER_FACE: usize = 6;
-pub(crate) const FACES_PER_VOXEL: usize = 6;
-pub(crate) const FACE_FILLED_NUM_BITS: u32 = 30;
-pub(crate) const GENERATE_MESH_WORKGROUP_SIZE: u32 = 64;
-pub(crate) const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
-pub(crate) const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
-    GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
+    #[repr(C)]
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
+    pub struct ShaderArgs {
+        pub a_size: UVec3,
+        pub _padding0: u32,
+        pub b_size: UVec3,
+        pub _padding1: u32,
+        pub out_size: UVec3,
+        pub _padding2: u32,
+    }
+
+    pub const WGSL_ARGS_BINDING: u32 = 0;
+    pub const WGSL_VOXEL_GRID_A_BINDING: u32 = 1;
+    pub const WGSL_VOXEL_GRID_B_BINDING: u32 = 2;
+    pub const WGSL_VOXEL_GRID_OUT_BINDING: u32 = 3;
+    pub const WGSL_FACE_FILLED_BINDING: u32 = 4;
+    pub const WGSL_MESH_BINDING: u32 = 5;
+    pub const WGSL_MESH_NORMALS_BINDING: u32 = 6;
+
+    pub const WGSL_VEC3_STRIDE: usize = size_of::<Vec4>(); // WGSL pads vec3
+    pub const WGSL_FACE_STRIDE: usize = WGSL_VEC3_STRIDE * VERTEXES_PER_FACE;
+    pub const WGSL_FACES_STRIDE: usize = WGSL_FACE_STRIDE * FACES_PER_VOXEL;
+
+    pub const VERTEXES_PER_FACE: usize = 6;
+    pub const FACES_PER_VOXEL: usize = 6;
+    pub const FACE_FILLED_NUM_BITS: u32 = 30;
+    pub const GENERATE_MESH_WORKGROUP_SIZE: u32 = 64;
+    pub const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
+    pub const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
+        GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
+}
+
+use unstable::*;
 
 /// Voxels stored in a [Vec].
 ///
@@ -174,7 +195,7 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
         label: Some("generate_mesh_bind_group_layout"),
         entries: &[
             BindGroupLayoutEntry {
-                binding: WGSL_VOXEL_GRID_A_SIZE_BINDING,
+                binding: WGSL_ARGS_BINDING,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
@@ -194,6 +215,16 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
                 count: None,
             },
             BindGroupLayoutEntry {
+                binding: WGSL_FACE_FILLED_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
                 binding: WGSL_MESH_BINDING,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
@@ -205,16 +236,6 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
             },
             BindGroupLayoutEntry {
                 binding: WGSL_MESH_NORMALS_BINDING,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            BindGroupLayoutEntry {
-                binding: WGSL_FACE_FILLED_BINDING,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Storage { read_only: false },
@@ -282,6 +303,19 @@ impl GenerateMeshImpl {
         let buffer_size = face_filled_offset
             + (num_faces + FACE_FILLED_NUM_BITS as usize - 1) / FACE_FILLED_NUM_BITS as usize * 4;
 
+        let args = ShaderArgs {
+            a_size: grid_buffer.size,
+            ..Default::default()
+        };
+        let args_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: size_of::<ShaderArgs>() as u64,
+            usage: BufferUsages::UNIFORM,
+            mapped_at_creation: true,
+        });
+        *from_bytes_mut::<ShaderArgs>(&mut args_buffer.slice(..).get_mapped_range_mut()) = args;
+        args_buffer.unmap();
+
         let storage_buffer = device.create_buffer(&BufferDescriptor {
             label: None,
             size: buffer_size as u64,
@@ -294,21 +328,35 @@ impl GenerateMeshImpl {
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let uniform_buffer = device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: size_of::<Vec3>() as u64,
-            usage: BufferUsages::UNIFORM,
-            mapped_at_creation: true,
-        });
-
-        cast_slice_mut::<u8, UVec3>(&mut uniform_buffer.slice(..).get_mapped_range_mut())[0] =
-            grid_buffer.size;
-        uniform_buffer.unmap();
 
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("generate_mesh_bind_group"),
             layout: bind_group_layout,
             entries: &[
+                BindGroupEntry {
+                    binding: WGSL_ARGS_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &args_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_VOXEL_GRID_A_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &grid_buffer.buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_FACE_FILLED_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &storage_buffer,
+                        offset: face_filled_offset as u64,
+                        size: None,
+                    }),
+                },
                 BindGroupEntry {
                     binding: WGSL_MESH_BINDING,
                     resource: BindingResource::Buffer(BufferBinding {
@@ -323,30 +371,6 @@ impl GenerateMeshImpl {
                         buffer: &storage_buffer,
                         offset: normals_offset as u64,
                         size: NonZeroU64::new((face_filled_offset - normals_offset) as u64),
-                    }),
-                },
-                BindGroupEntry {
-                    binding: WGSL_FACE_FILLED_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &storage_buffer,
-                        offset: face_filled_offset as u64,
-                        size: None,
-                    }),
-                },
-                BindGroupEntry {
-                    binding: WGSL_VOXEL_GRID_A_SIZE_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &uniform_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                BindGroupEntry {
-                    binding: WGSL_VOXEL_GRID_A_BINDING,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &grid_buffer.buffer,
-                        offset: 0,
-                        size: None,
                     }),
                 },
             ],
