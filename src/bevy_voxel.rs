@@ -44,9 +44,6 @@ impl From<VoxelGridVec> for VoxelGridData {
     }
 }
 
-// lock order: SharedVoxelGridContent, SharedVoxelGridBuffer
-pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
-
 #[derive(Component, Clone, Debug, Default, TypePath, ExtractComponent, Deref, DerefMut)]
 pub struct VoxelGrid(SharedVoxelGridBuffer);
 

@@ -268,8 +268,9 @@ pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
 /// * `[add_copy]`. This may be on a different queue, but the
 ///   copy's execution must happen after the pass's execution.
 /// * `[async_map_buffer]`. Only call this after the copy has
-///   finished.
-/// * `[get_mesh]`. Only call this after the map has finished.
+///   finished executing on the GPU.
+/// * `[get_mesh]`. Only call this after async_map_buffer has
+///   called its callback.
 #[derive(Debug)]
 pub struct GenerateMeshImpl {
     // Excludes padding
