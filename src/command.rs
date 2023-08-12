@@ -10,10 +10,11 @@ pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
 /// A command to be executed
 ///
 /// Call the following in order:
-/// * `[generate_mesh_bind_group_layout]` once per device.
-///    After this, you should generate a pipeline using the
-///    layout then cache both the layout and the pipeline.
-///    You'll need these to call `[prepare]` and `[add_pass]`.
+/// * If the concrete type uses a shader, then it will provide
+///   the `ENTRY_POINT` constant and the
+///   `generate_mesh_bind_group_layout` associated method.
+///   Get and cache the layout during startup. You'll need
+///   these to call `[prepare]` and `[add_pass]`.
 /// * `[prepare]`
 /// * `[add_pass]`
 /// * `[add_copy]`. This may be on a different queue, but the
@@ -21,33 +22,74 @@ pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
 /// * `[async_finish]`. Only call this after the pass and copy
 ///   operations have finished executing on the GPU.
 trait Command {
-    /// Shader entry point
-    const ENTRY_POINT: &'static str;
-
-    /// Create bind group layout
-    fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout;
-
     /// Create buffers and bind group. get_bind_group_layout's argument
-    /// is `[ENTRY_POINT]`.
-    fn prepare<'a, F: FnOnce(&str) -> &'a BindGroupLayout>(
+    /// is `ENTRY_POINT`.
+    fn prepare<'a>(
         &mut self,
         device: &Device,
-        get_bind_group_layout: F,
+        get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
     );
 
     /// Add the compute pass to the command encoder. get_pipeline's argument
-    /// is `[ENTRY_POINT]`.
-    fn add_pass<'a, F: FnOnce(&str) -> &'a ComputePipeline>(
+    /// is `ENTRY_POINT`.
+    fn add_pass<'a>(
         &self,
         encoder: &mut CommandEncoder,
-        get_pipeline: F,
+        get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
     );
 
     /// Add buffer copies, if any, to the command encoder
     fn add_copy(&self, encoder: &mut CommandEncoder);
 
     /// Map the copy buffers if needed and perform any finalization steps, then call the callback
-    fn async_finish(&mut self, done: impl FnOnce(Result<(), BufferAsyncError>) + Send + 'static);
+    fn async_finish(&mut self, done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send));
+}
+
+fn _verify_object_safety() {
+    let _: &dyn Command = &CreateGridCommand::default();
+}
+
+/// Create a voxel grid with the given size.
+#[derive(Clone, Debug, Default)]
+pub struct CreateGridCommand {
+    /// Destination. Reuse the existing buffer without clearing if it already exists
+    /// and its size matches.
+    grid: SharedVoxelGridBuffer,
+
+    /// Size of the voxel grid, excluding padding
+    size: UVec3,
+}
+
+impl Command for CreateGridCommand {
+    fn prepare<'a>(
+        &mut self,
+        device: &Device,
+        _get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
+    ) {
+        let mut lock = self.grid.lock().unwrap();
+        if let Some(grid) = &*lock {
+            if grid.size == self.size {
+                return;
+            }
+        }
+        *lock = Some(VoxelGridBuffer::new(self.size, device, false));
+    }
+
+    fn add_pass<'a>(
+        &self,
+        _encoder: &mut CommandEncoder,
+        _get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
+    ) {
+    }
+
+    fn add_copy(&self, _encoder: &mut CommandEncoder) {}
+
+    fn async_finish(
+        &mut self,
+        done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
+    ) {
+        done(Ok(()));
+    }
 }
 
 /// Convert a voxel grid to a mesh.
@@ -63,6 +105,14 @@ pub struct GenerateMeshCommand<F> {
 }
 
 impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> GenerateMeshCommand<F> {
+    /// Shader entry point
+    pub const ENTRY_POINT: &'static str = GENERATE_MESH_ENTRY_POINT;
+
+    /// Create bind group layout, if this uses a shader
+    pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
+        generate_mesh_bind_group_layout(device)
+    }
+
     pub fn new(grid: SharedVoxelGridBuffer, receive_result: F) -> Self {
         Self {
             grid,
@@ -73,16 +123,10 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> GenerateMeshComman
 }
 
 impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for GenerateMeshCommand<F> {
-    const ENTRY_POINT: &'static str = GENERATE_MESH_ENTRY_POINT;
-
-    fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
-        generate_mesh_bind_group_layout(device)
-    }
-
-    fn prepare<'a, G: FnOnce(&str) -> &'a BindGroupLayout>(
+    fn prepare<'a>(
         &mut self,
         device: &Device,
-        get_bind_group_layout: G,
+        get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
     ) {
         let lock = self.grid.lock().unwrap();
         self.cmd_impl = Some(GenerateMeshImpl::new(
@@ -92,10 +136,10 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for Genera
         ));
     }
 
-    fn add_pass<'a, G: FnOnce(&str) -> &'a ComputePipeline>(
+    fn add_pass<'a>(
         &self,
         encoder: &mut CommandEncoder,
-        get_pipeline: G,
+        get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
     ) {
         self.cmd_impl
             .as_ref()
@@ -109,7 +153,10 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for Genera
     }
 
     /// Map the copy buffers if needed (async) then call the callback
-    fn async_finish(&mut self, done: impl FnOnce(Result<(), BufferAsyncError>) + Send + 'static) {
+    fn async_finish(
+        &mut self,
+        done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
+    ) {
         let mut receive_result = self.receive_result.clone();
         self.cmd_impl
             .take()
@@ -124,17 +171,4 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for Genera
                 }
             });
     }
-}
-
-/// Create a voxel grid with the given size.
-#[derive(Clone, Debug, Default)]
-pub struct CreateGridCommand {
-    /// Destination. Reuse the existing buffer if it already exists and its size matches.
-    grid: SharedVoxelGridBuffer,
-
-    /// Size of the voxel grid, excluding padding
-    size: UVec3,
-
-    /// If Some, clear the voxel grid to this material
-    clear_material: Option<u8>,
 }
