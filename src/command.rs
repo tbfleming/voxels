@@ -1,4 +1,4 @@
-use glam::{UVec3, Vec3};
+use glam::{IVec3, UVec3, Vec3};
 use std::sync::{Arc, Mutex};
 use wgpu::{BindGroupLayout, BufferAsyncError, CommandEncoder, ComputePipeline, Device};
 
@@ -12,7 +12,7 @@ pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
 /// Call the following in order:
 /// * If the concrete type uses a shader, then it will provide
 ///   the `ENTRY_POINT` constant and the
-///   `generate_mesh_bind_group_layout` associated method.
+///   `bind_group_layout` associated method.
 ///   Get and cache the layout during startup. You'll need
 ///   these to call `[prepare]` and `[add_pass]`.
 /// * `[prepare]`
@@ -90,7 +90,7 @@ impl Command for CreateGridCommand {
     ) {
         done(Ok(()));
     }
-}
+} // impl Command for CreateGridCommand
 
 /// Convert a voxel grid to a mesh.
 #[derive(Debug)]
@@ -108,8 +108,8 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> GenerateMeshComman
     /// Shader entry point
     pub const ENTRY_POINT: &'static str = GENERATE_MESH_ENTRY_POINT;
 
-    /// Create bind group layout, if this uses a shader
-    pub fn generate_mesh_bind_group_layout(device: &Device) -> BindGroupLayout {
+    /// Create bind group layout
+    pub fn bind_group_layout(device: &Device) -> BindGroupLayout {
         generate_mesh_bind_group_layout(device)
     }
 
@@ -147,12 +147,10 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for Genera
             .add_pass(get_pipeline(Self::ENTRY_POINT), encoder);
     }
 
-    /// Add buffer copies, if any, to the command encoder
     fn add_copy(&self, encoder: &mut CommandEncoder) {
         self.cmd_impl.as_ref().unwrap().add_copy(encoder);
     }
 
-    /// Map the copy buffers if needed (async) then call the callback
     fn async_finish(
         &mut self,
         done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
@@ -171,4 +169,106 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for Genera
                 }
             });
     }
+} // impl Command for GenerateMeshCommand
+
+/// Type of geometry operation to perform
+#[derive(Debug, Clone)]
+pub enum GeometryOp {
+    Sphere {
+        /// Diameter of sphere
+        diameter: u32,
+
+        /// Offset sphere's coordinates
+        offset: IVec3,
+
+        /// Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
+        /// Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
+        flags: u32,
+
+        /// Material to paste
+        material: u32,
+    },
 }
+
+/// Apply geometry to a mesh
+#[derive(Debug)]
+pub struct GeometryCommand {
+    /// Grid to operate on
+    pub grid: SharedVoxelGridBuffer,
+
+    /// Type of geometry operation to perform
+    pub geometry: GeometryOp,
+
+    cmd_impl: Option<GeometryImpl>,
+}
+
+impl GeometryCommand {
+    /// PasteSphere entry point
+    pub const PASTE_SPHERE_ENTRY_POINT: &'static str = GENERATE_MESH_ENTRY_POINT;
+
+    /// Create bind group layout. This is the same for all geometry operations.
+    pub fn bind_group_layout(device: &Device) -> BindGroupLayout {
+        geometry_bind_group_layout(device)
+    }
+
+    /// Create the command
+    pub fn new(grid: SharedVoxelGridBuffer, geometry: GeometryOp) -> Self {
+        Self {
+            grid,
+            geometry,
+            cmd_impl: Default::default(),
+        }
+    }
+}
+
+impl Command for GeometryCommand {
+    fn prepare<'a>(
+        &mut self,
+        device: &Device,
+        get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
+    ) {
+        let lock = self.grid.lock().unwrap();
+        let grid = lock.as_ref().expect("Missing grid in GeometryCommand");
+        match &self.geometry {
+            GeometryOp::Sphere {
+                diameter,
+                offset,
+                flags,
+                material,
+            } => {
+                self.cmd_impl = Some(GeometryImpl::new_sphere(
+                    device,
+                    get_bind_group_layout(Self::PASTE_SPHERE_ENTRY_POINT),
+                    grid,
+                    *diameter,
+                    *offset,
+                    *flags,
+                    *material,
+                ));
+            }
+        }
+    }
+
+    fn add_pass<'a>(
+        &self,
+        encoder: &mut CommandEncoder,
+        get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
+    ) {
+        let entry_point = match &self.geometry {
+            GeometryOp::Sphere { .. } => Self::PASTE_SPHERE_ENTRY_POINT,
+        };
+        self.cmd_impl
+            .as_ref()
+            .unwrap()
+            .add_pass(get_pipeline(entry_point), encoder);
+    }
+
+    fn add_copy(&self, _encoder: &mut CommandEncoder) {}
+
+    fn async_finish(
+        &mut self,
+        done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
+    ) {
+        done(Ok(()));
+    }
+} // impl Command for GenerateMeshCommand

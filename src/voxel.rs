@@ -1,5 +1,5 @@
 use bytemuck::{cast_slice, checked::from_bytes_mut};
-use glam::{UVec3, Vec3, Vec4};
+use glam::{IVec3, UVec3, Vec3, Vec4};
 use std::{mem::size_of, num::NonZeroU64, sync::Arc};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
@@ -9,6 +9,7 @@ use wgpu::{
 };
 
 pub const GENERATE_MESH_ENTRY_POINT: &str = "generate_mesh";
+pub const PASTE_SPHERE_ENTRY_POINT: &str = "paste_sphere";
 
 pub mod unstable {
     use bytemuck::{Pod, Zeroable};
@@ -52,6 +53,8 @@ pub mod unstable {
     pub const GENERATE_MESH_VOXELS_PER_INVOCATION: u32 = 5;
     pub const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
         GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
+
+    pub const PASTE_SPHERE_VOXELS_PER_WORKGROUP: u32 = 64;
 
     pub const PASTE_MATERIAL_FLAG: u32 = 1;
     pub const PASTE_MATERIAL_ARG_FLAG: u32 = 2;
@@ -474,5 +477,141 @@ impl GenerateMeshImpl {
         // println!("   num_faces: {:?}", num_faces);
         assert!(filled == num_faces);
         (vertexes, normals)
+    }
+}
+
+/// Create BindGroupLayout for the shader's geometry functions.
+pub fn geometry_bind_group_layout(device: &Device) -> BindGroupLayout {
+    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("paste_geometry_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: WGSL_ARGS_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: WGSL_VOXEL_GRID_OUT_BINDING,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Use one of the shader's geometry functions.
+///
+/// Call the following in order:
+/// * `[new_*]`
+/// * `[add_pass]`
+#[derive(Debug)]
+pub struct GeometryImpl {
+    bind_group: BindGroup,
+    workgroup_size: UVec3,
+}
+
+impl GeometryImpl {
+    fn new_impl(
+        device: &Device,
+        bind_group_layout: &BindGroupLayout,
+        grid_buffer: &VoxelGridBuffer,
+        args: ShaderArgs,
+        workgroup_size: UVec3,
+    ) -> Self {
+        let args_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: size_of::<ShaderArgs>() as u64,
+            usage: BufferUsages::UNIFORM,
+            mapped_at_creation: true,
+        });
+        *from_bytes_mut::<ShaderArgs>(&mut args_buffer.slice(..).get_mapped_range_mut()) = args;
+        args_buffer.unmap();
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("paste_geometry_bind_group"),
+            layout: bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: WGSL_ARGS_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &args_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: WGSL_VOXEL_GRID_OUT_BINDING,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: &grid_buffer.buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
+        Self {
+            bind_group,
+            workgroup_size,
+        }
+    }
+
+    /// Create buffers and bind group
+    ///
+    /// * grid_buffer:  Voxel grid to modify
+    /// * diameter:     Diameter of sphere
+    /// * offset:       Offset sphere's coordinates
+    /// * flags:        Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
+    ///                 Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
+    /// * material:     Material to paste
+    pub fn new_sphere(
+        device: &Device,
+        bind_group_layout: &BindGroupLayout,
+        grid_buffer: &VoxelGridBuffer,
+        diameter: u32,
+        offset: IVec3,
+        flags: u32,
+        material: u32,
+    ) -> Self {
+        let args = ShaderArgs {
+            out_size: grid_buffer.size,
+            offset,
+            flags,
+            material,
+            diameter,
+            ..Default::default()
+        };
+        let workgroup_size =
+            ((grid_buffer.size.x + 1) * (grid_buffer.size.y + 1) * (grid_buffer.size.z + 1)
+                + PASTE_SPHERE_VOXELS_PER_WORKGROUP
+                - 1)
+                / PASTE_SPHERE_VOXELS_PER_WORKGROUP;
+        Self::new_impl(
+            device,
+            bind_group_layout,
+            grid_buffer,
+            args,
+            UVec3::new(workgroup_size, workgroup_size, workgroup_size),
+        )
+    }
+
+    /// Add the compute pass to the command encoder
+    pub fn add_pass(&self, pipeline: &ComputePipeline, encoder: &mut CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor::default());
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_pipeline(pipeline);
+        pass.dispatch_workgroups(
+            self.workgroup_size.x,
+            self.workgroup_size.y,
+            self.workgroup_size.z,
+        );
     }
 }

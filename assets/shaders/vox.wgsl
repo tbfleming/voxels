@@ -270,12 +270,12 @@ fn sphere_vertex(pos: vec3<i32>, size: u32) -> u32 {
 // (args.offset + vec3(diameter/2, diameter/2, diameter/2)).
 //
 // args: {
-//     out_size:    size of voxel_grid_out
-//     offset:      offset sphere's coordinates
+//     out_size:    Size of voxel_grid_out
+//     offset:      Offset sphere's coordinates
 //     flags:       Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
 //                  Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
-//     material:    material to paste
-//     diameter:    diameter of sphere
+//     material:    Material to paste
+//     diameter:    Diameter of sphere
 // }
 //
 // This needs ceil(((args.diameter.x+1) * (args.diameter.y+1) * (args.diameter.z+1)) / 64) workgroups.
