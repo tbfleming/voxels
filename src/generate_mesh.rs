@@ -9,10 +9,11 @@ use bevy::{
         Render, RenderApp, RenderSet,
     },
 };
+use parking_lot::Mutex;
 use std::{
     borrow::Cow,
     mem::{replace, take},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use crate::*;
@@ -74,8 +75,8 @@ fn prepare_generate_mesh(
     // println!("** prepare_generate_mesh");
     for (generate_mesh, voxel_grid) in generate_meshes.iter() {
         // println!("** prepare_generate_mesh: ?");
-        let grid_buffer_guard = voxel_grid.lock().unwrap();
-        let mut mesh_state_guard = generate_mesh.0.lock().unwrap();
+        let grid_buffer_guard = voxel_grid.lock();
+        let mut mesh_state_guard = generate_mesh.0.lock();
         let Some(grid_buffer) = &*grid_buffer_guard else {
             continue;
         };
@@ -95,7 +96,7 @@ fn prepare_generate_mesh(
 
 fn map_generate_mesh(mut pipeline: ResMut<GenerationPipeline>) {
     for shared_state in take(&mut pipeline.states) {
-        let mut guard = shared_state.lock().unwrap();
+        let mut guard = shared_state.lock();
         let state = replace(&mut *guard, GenerateMeshState::Mapping);
         let GenerateMeshState::Busy(gen_impl) = state else {
             *guard = state;
@@ -105,7 +106,7 @@ fn map_generate_mesh(mut pipeline: ResMut<GenerationPipeline>) {
         gen_impl.async_map_buffer(move |gen_impl, res| {
             println!("mapped?: {:?}", res);
             if res.is_ok() {
-                *shared_state.lock().unwrap() = GenerateMeshState::Mapped(gen_impl);
+                *shared_state.lock() = GenerateMeshState::Mapped(gen_impl);
             }
         });
     }
@@ -117,7 +118,7 @@ fn finalize_generate_mesh(
     mut query: Query<(Entity, &GenerateMesh)>,
 ) {
     for (entity, generate_mesh) in query.iter_mut() {
-        let mut guard = generate_mesh.0.lock().unwrap();
+        let mut guard = generate_mesh.0.lock();
         let state = replace(&mut *guard, GenerateMeshState::Done);
         let GenerateMeshState::Mapped(gen_impl) = state else {
             *guard = state;
@@ -177,7 +178,7 @@ impl render_graph::Node for GenerationNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<GenerationPipeline>();
         for shared_state in pipeline.states.iter() {
-            let guard = shared_state.lock().unwrap();
+            let guard = shared_state.lock();
             let GenerateMeshState::Busy(gen_impl) = &*guard else {
                 continue;
             };

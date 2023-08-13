@@ -3607,6 +3607,7 @@ dependencies = [
  "bevy_screen_diagnostics",
  "bytemuck",
  "glam",
+ "parking_lot",
  "wgpu",
 ]
 

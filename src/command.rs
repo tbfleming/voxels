@@ -1,5 +1,6 @@
 use glam::{IVec3, UVec3, Vec3};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::{fmt::Debug, sync::Arc};
 use wgpu::{BindGroupLayout, BufferAsyncError, CommandEncoder, ComputePipeline, Device};
 
 use crate::voxel::*;
@@ -21,7 +22,7 @@ pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
 ///   copy's execution must happen after the pass's execution.
 /// * `[async_finish]`. Only call this after the pass and copy
 ///   operations have finished executing on the GPU.
-trait Command {
+pub trait Command {
     /// Create buffers and bind group. get_bind_group_layout's argument
     /// is `ENTRY_POINT`.
     fn prepare<'a>(
@@ -42,7 +43,7 @@ trait Command {
     fn add_copy(&self, encoder: &mut CommandEncoder);
 
     /// Map the copy buffers if needed and perform any finalization steps, then call the callback
-    fn async_finish(&mut self, done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send));
+    fn async_finish(&mut self, done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>);
 }
 
 fn _verify_object_safety() {
@@ -66,13 +67,13 @@ impl Command for CreateGridCommand {
         device: &Device,
         _get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
     ) {
-        let mut lock = self.grid.lock().unwrap();
-        if let Some(grid) = &*lock {
+        let mut guard = self.grid.lock();
+        if let Some(grid) = &*guard {
             if grid.size == self.size {
                 return;
             }
         }
-        *lock = Some(VoxelGridBuffer::new(self.size, device, false));
+        *guard = Some(VoxelGridBuffer::new(self.size, device, false));
     }
 
     fn add_pass<'a>(
@@ -84,27 +85,23 @@ impl Command for CreateGridCommand {
 
     fn add_copy(&self, _encoder: &mut CommandEncoder) {}
 
-    fn async_finish(
-        &mut self,
-        done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
-    ) {
+    fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
         done(Ok(()));
     }
 } // impl Command for CreateGridCommand
 
 /// Convert a voxel grid to a mesh.
-#[derive(Debug)]
-pub struct GenerateMeshCommand<F> {
+pub struct GenerateMeshCommand {
     /// Grid to turn into a mesh
     pub grid: SharedVoxelGridBuffer,
 
     /// Receives the generated vertexes and normals
-    pub receive_result: F,
+    pub receive_result: Arc<dyn Fn(Vec<Vec3>, Vec<Vec3>) + 'static + Sync + Send>,
 
     cmd_impl: Option<GenerateMeshImpl>,
 }
 
-impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> GenerateMeshCommand<F> {
+impl GenerateMeshCommand {
     /// Shader entry point
     pub const ENTRY_POINT: &'static str = GENERATE_MESH_ENTRY_POINT;
 
@@ -113,7 +110,10 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> GenerateMeshComman
         generate_mesh_bind_group_layout(device)
     }
 
-    pub fn new(grid: SharedVoxelGridBuffer, receive_result: F) -> Self {
+    pub fn new(
+        grid: SharedVoxelGridBuffer,
+        receive_result: Arc<dyn Fn(Vec<Vec3>, Vec<Vec3>) + 'static + Sync + Send>,
+    ) -> Self {
         Self {
             grid,
             receive_result,
@@ -122,17 +122,17 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> GenerateMeshComman
     }
 }
 
-impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for GenerateMeshCommand<F> {
+impl Command for GenerateMeshCommand {
     fn prepare<'a>(
         &mut self,
         device: &Device,
         get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
     ) {
-        let lock = self.grid.lock().unwrap();
+        let guard = self.grid.lock();
         self.cmd_impl = Some(GenerateMeshImpl::new(
             device,
             get_bind_group_layout(Self::ENTRY_POINT),
-            lock.as_ref().expect("Missing grid in GenerateMeshCommand"),
+            guard.as_ref().expect("Missing grid in GenerateMeshCommand"),
         ));
     }
 
@@ -151,11 +151,8 @@ impl<F: FnMut(Vec<Vec3>, Vec<Vec3>) + 'static + Send + Clone> Command for Genera
         self.cmd_impl.as_ref().unwrap().add_copy(encoder);
     }
 
-    fn async_finish(
-        &mut self,
-        done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
-    ) {
-        let mut receive_result = self.receive_result.clone();
+    fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
+        let receive_result = self.receive_result.clone();
         self.cmd_impl
             .take()
             .unwrap()
@@ -204,7 +201,7 @@ pub struct GeometryCommand {
 
 impl GeometryCommand {
     /// PasteSphere entry point
-    pub const PASTE_SPHERE_ENTRY_POINT: &'static str = GENERATE_MESH_ENTRY_POINT;
+    pub const PASTE_SPHERE_ENTRY_POINT: &'static str = PASTE_SPHERE_ENTRY_POINT;
 
     /// Create bind group layout. This is the same for all geometry operations.
     pub fn bind_group_layout(device: &Device) -> BindGroupLayout {
@@ -227,8 +224,8 @@ impl Command for GeometryCommand {
         device: &Device,
         get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
     ) {
-        let lock = self.grid.lock().unwrap();
-        let grid = lock.as_ref().expect("Missing grid in GeometryCommand");
+        let guard = self.grid.lock();
+        let grid = guard.as_ref().expect("Missing grid in GeometryCommand");
         match &self.geometry {
             GeometryOp::Sphere {
                 diameter,
@@ -265,10 +262,7 @@ impl Command for GeometryCommand {
 
     fn add_copy(&self, _encoder: &mut CommandEncoder) {}
 
-    fn async_finish(
-        &mut self,
-        done: &'static mut (dyn FnMut(Result<(), BufferAsyncError>) + Send),
-    ) {
+    fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
         done(Ok(()));
     }
 } // impl Command for GenerateMeshCommand
