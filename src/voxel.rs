@@ -27,10 +27,10 @@ pub mod unstable {
         pub out_size: UVec3,
         pub _padding2: u32,
         pub offset: IVec3,
-        pub _padding3: u32,
         pub flags: u32,
         pub material: u32,
         pub diameter: u32,
+        pub _padding3: u32,
         pub _padding4: u32,
     }
 
@@ -55,13 +55,14 @@ pub mod unstable {
         GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
 
     pub const PASTE_SPHERE_VOXELS_PER_WORKGROUP: u32 = 64;
-
-    pub const PASTE_MATERIAL_FLAG: u32 = 1;
-    pub const PASTE_MATERIAL_ARG_FLAG: u32 = 2;
-    pub const PASTE_VERTEXES_FLAG: u32 = 4;
 }
 
 use unstable::*;
+
+pub const PASTE_MATERIAL_FLAG: u32 = 1;
+pub const PASTE_MATERIAL_ARG_FLAG: u32 = 2;
+pub const PASTE_VERTEXES_FLAG: u32 = 4;
+pub const PASTE: u32 = PASTE_MATERIAL_FLAG | PASTE_VERTEXES_FLAG;
 
 /// Voxels stored in a [Vec].
 ///
@@ -164,7 +165,7 @@ pub fn voxel_index_i32(size: UVec3, x: i32, y: i32, z: i32) -> usize {
 
 /// Voxels readable and writable by the GPU. See [VoxelGridContent] for the format.
 #[derive(Debug)]
-pub struct VoxelGridBuffer {
+pub struct VoxelGrid {
     /// Size of the voxel grid, excluding padding
     pub size: UVec3,
 
@@ -173,21 +174,26 @@ pub struct VoxelGridBuffer {
     pub buffer: Buffer,
 }
 
-impl VoxelGridBuffer {
+impl VoxelGrid {
     /// Create a new voxel grid with the given size. The size does
     /// not include padding, but the result includes it.
     ///
     /// Panics if the size is too large.
     pub fn new(size: UVec3, device: &Device, mapped_at_creation: bool) -> Self {
-        Self {
-            size,
-            buffer: device.create_buffer(&BufferDescriptor {
-                label: Some("voxel_grid_buffer"),
-                size: get_buf_size(size) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-                mapped_at_creation,
-            }),
-        }
+        // println!(
+        //     "** VoxelGrid::new {} {} {}",
+        //     size,
+        //     get_buf_size(size),
+        //     mapped_at_creation
+        // );
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("voxel_grid_buffer"),
+            size: get_buf_size(size) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation,
+        });
+        // println!("** buffer {} {:?}", buffer.size(), buffer.usage());
+        Self { size, buffer }
     }
 
     /// Create a new voxel grid and copy the given content into it.
@@ -306,17 +312,23 @@ impl GenerateMeshImpl {
     pub fn new(
         device: &Device,
         bind_group_layout: &BindGroupLayout,
-        grid_buffer: &VoxelGridBuffer,
+        grid_buffer: &VoxelGrid,
     ) -> Self {
+        // println!("** GenerateMeshImpl::new");
         let num_voxels =
             grid_buffer.size.x as usize * grid_buffer.size.y as usize * grid_buffer.size.z as usize;
-        println!("   num_voxels: {:?}", num_voxels);
+        // println!("   num_voxels: {:?}", num_voxels);
         let normals_offset = num_voxels * WGSL_FACES_STRIDE;
         let face_filled_offset = normals_offset + num_voxels * WGSL_FACES_STRIDE;
-        println!("   face_filled_offset: {:?}", face_filled_offset);
+        // println!("   face_filled_offset: {:?}", face_filled_offset);
         let num_faces = num_voxels * FACES_PER_VOXEL;
         let buffer_size = face_filled_offset
             + (num_faces + FACE_FILLED_NUM_BITS as usize - 1) / FACE_FILLED_NUM_BITS as usize * 4;
+        // println!(
+        //     "    grid_buffer {} {:?}",
+        //     grid_buffer.buffer.size(),
+        //     grid_buffer.buffer.usage()
+        // );
 
         let args = ShaderArgs {
             a_size: grid_buffer.size,
@@ -404,7 +416,10 @@ impl GenerateMeshImpl {
 
     /// Add the compute pass to the command encoder
     pub fn add_pass(&self, pipeline: &ComputePipeline, encoder: &mut CommandEncoder) {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor::default());
+        // println!("** GenerateMeshImpl::add_pass");
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("generate_mesh_pass"),
+        });
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_pipeline(pipeline);
         pass.dispatch_workgroups(
@@ -417,6 +432,7 @@ impl GenerateMeshImpl {
 
     /// Add the buffer copy to the command encoder
     pub fn add_copy(&self, encoder: &mut CommandEncoder) {
+        // println!("** GenerateMeshImpl::add_copy");
         encoder.copy_buffer_to_buffer(
             &self.storage_buffer,
             0,
@@ -478,12 +494,12 @@ impl GenerateMeshImpl {
         assert!(filled == num_faces);
         (vertexes, normals)
     }
-}
+} // GenerateMeshImpl
 
 /// Create BindGroupLayout for the shader's geometry functions.
 pub fn geometry_bind_group_layout(device: &Device) -> BindGroupLayout {
     device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("paste_geometry_bind_group_layout"),
+        label: Some("geometry_bind_group_layout"),
         entries: &[
             BindGroupLayoutEntry {
                 binding: WGSL_ARGS_BINDING,
@@ -524,10 +540,18 @@ impl GeometryImpl {
     fn new_impl(
         device: &Device,
         bind_group_layout: &BindGroupLayout,
-        grid_buffer: &VoxelGridBuffer,
+        bind_group_label: &'static str,
+        grid_buffer: &VoxelGrid,
         args: ShaderArgs,
         workgroup_size: UVec3,
     ) -> Self {
+        // println!("** GeometryImpl::new_impl");
+        // println!("   {:?}", args);
+        // println!(
+        //     "    grid_buffer {} {:?}",
+        //     grid_buffer.buffer.size(),
+        //     grid_buffer.buffer.usage()
+        // );
         let args_buffer = device.create_buffer(&BufferDescriptor {
             label: None,
             size: size_of::<ShaderArgs>() as u64,
@@ -537,7 +561,7 @@ impl GeometryImpl {
         *from_bytes_mut::<ShaderArgs>(&mut args_buffer.slice(..).get_mapped_range_mut()) = args;
         args_buffer.unmap();
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("paste_geometry_bind_group"),
+            label: Some(bind_group_label),
             layout: bind_group_layout,
             entries: &[
                 BindGroupEntry {
@@ -575,7 +599,7 @@ impl GeometryImpl {
     pub fn new_sphere(
         device: &Device,
         bind_group_layout: &BindGroupLayout,
-        grid_buffer: &VoxelGridBuffer,
+        grid_buffer: &VoxelGrid,
         diameter: u32,
         offset: IVec3,
         flags: u32,
@@ -589,23 +613,27 @@ impl GeometryImpl {
             diameter,
             ..Default::default()
         };
-        let workgroup_size =
-            ((grid_buffer.size.x + 1) * (grid_buffer.size.y + 1) * (grid_buffer.size.z + 1)
-                + PASTE_SPHERE_VOXELS_PER_WORKGROUP
-                - 1)
-                / PASTE_SPHERE_VOXELS_PER_WORKGROUP;
+        let workgroup_size = ((diameter + 1) * (diameter + 1) * (diameter + 1)
+            + PASTE_SPHERE_VOXELS_PER_WORKGROUP
+            - 1)
+            / PASTE_SPHERE_VOXELS_PER_WORKGROUP;
         Self::new_impl(
             device,
             bind_group_layout,
+            "paste_sphere_bind_group",
             grid_buffer,
             args,
-            UVec3::new(workgroup_size, workgroup_size, workgroup_size),
+            UVec3::new(workgroup_size, 1, 1),
         )
     }
 
     /// Add the compute pass to the command encoder
     pub fn add_pass(&self, pipeline: &ComputePipeline, encoder: &mut CommandEncoder) {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor::default());
+        // println!("** GeometryImpl::add_pass");
+        // println!("   workgroup_size: {:?}", self.workgroup_size);
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("geometry_pass"),
+        });
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_pipeline(pipeline);
         pass.dispatch_workgroups(
@@ -614,4 +642,4 @@ impl GeometryImpl {
             self.workgroup_size.z,
         );
     }
-}
+} // GeometryImpl

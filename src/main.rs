@@ -10,6 +10,7 @@ use bevy::{
 use bevy_editor_pls::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_screen_diagnostics::{ScreenDiagnosticsPlugin, ScreenFrameDiagnosticsPlugin};
+use std::sync::Arc;
 
 use voxel::*;
 
@@ -27,7 +28,6 @@ fn main() {
             ScreenDiagnosticsPlugin::default(),
             ScreenFrameDiagnosticsPlugin,
             VoxelPlugin,
-            GenerateMeshPlugin,
         ))
         .add_systems(Startup, setup)
         .run();
@@ -54,23 +54,34 @@ fn setup(
         Wireframe,
     ));
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+    let mut empty_mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    empty_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+
+    // let _dump = Arc::new(|grid: VoxelGridVec| println!("\n{:#?}\n", &grid.data[..6]));
+    let _dump = Arc::new(|grid: VoxelGridVec| println!("\n{:#?}\n", &grid.data));
+
+    let diameter = 20;
+    let grid = SharedVoxelGrid::new();
+    let generate_mesh = GenerateMesh::new();
+    let voxel_commands = vec![
+        CreateGridCommand::new(grid.clone(), UVec3::new(diameter, diameter, diameter)).boxed(),
+        GeometryCommand::sphere(grid.clone(), diameter, default(), PASTE, 1).boxed(),
+        // GetVoxelsCommand::new(grid.clone(), _dump.clone()).boxed(),
+        generate_mesh.create_command(grid.clone()).boxed(),
+    ];
 
     commands.spawn((
         PbrBundle {
-            mesh: meshes.add(mesh),
+            mesh: meshes.add(empty_mesh),
             material: materials.add(Color::rgba(0.0, 0.7, 0.7, 1.0).into()),
             transform: Transform::from_xyz(0.0, 0.5, 0.0),
             ..default()
         },
         Wireframe,
-        // VoxelGridData::new(UVec3::new(2, 2, 2), 1),
-        // VoxelGrid::new(UVec3::new(2, 2, 2)),
-        VoxelGridData::from(sphere(6, 1)),
-        VoxelGrid::new(),
-        GenerateMesh::new(),
+        generate_mesh,
+        VoxelCommandList::new(voxel_commands),
     ));
+
     commands.spawn(DirectionalLightBundle {
         transform: Transform::from_xyz(3.5 + 20.0, 2.5 + 20.0, 5.0 + 20.0)
             .looking_at(Vec3::ZERO, Vec3::Y),

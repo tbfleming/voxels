@@ -1,12 +1,42 @@
+use bytemuck::cast_slice;
 use glam::{IVec3, UVec3, Vec3};
 use parking_lot::Mutex;
-use std::{fmt::Debug, sync::Arc};
-use wgpu::{BindGroupLayout, BufferAsyncError, CommandEncoder, ComputePipeline, Device};
+use std::{
+    fmt::Debug,
+    mem::size_of,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
+use wgpu::{
+    BindGroupLayout, Buffer, BufferAsyncError, BufferDescriptor, BufferUsages, CommandEncoder,
+    ComputePipeline, Device, MapMode,
+};
 
 use crate::voxel::*;
 
-// lock order: SharedVoxelGridContent, SharedVoxelGridBuffer
-pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
+// lock order: SharedVoxelGridContent, SharedVoxelGrid
+#[derive(Debug, Clone, Default)]
+pub struct SharedVoxelGrid(Arc<Mutex<Option<VoxelGrid>>>);
+
+impl SharedVoxelGrid {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Deref for SharedVoxelGrid {
+    type Target = Arc<Mutex<Option<VoxelGrid>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SharedVoxelGrid {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// A command to be executed
 ///
@@ -22,7 +52,15 @@ pub type SharedVoxelGridBuffer = Arc<Mutex<Option<VoxelGridBuffer>>>;
 ///   copy's execution must happen after the pass's execution.
 /// * `[async_finish]`. Only call this after the pass and copy
 ///   operations have finished executing on the GPU.
-pub trait Command {
+pub trait VoxelCommand {
+    /// Create a boxed version of this command suitable for `[VoxelCommandVec]`.
+    fn boxed(self) -> Box<dyn VoxelCommand + Send + Sync>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        Box::new(self)
+    }
+
     /// Create buffers and bind group. get_bind_group_layout's argument
     /// is `ENTRY_POINT`.
     fn prepare<'a>(
@@ -46,22 +84,26 @@ pub trait Command {
     fn async_finish(&mut self, done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>);
 }
 
-fn _verify_object_safety() {
-    let _: &dyn Command = &CreateGridCommand::default();
-}
+pub type VoxelCommandVec = Vec<Box<dyn VoxelCommand + Send + Sync>>;
 
 /// Create a voxel grid with the given size.
 #[derive(Clone, Debug, Default)]
 pub struct CreateGridCommand {
     /// Destination. Reuse the existing buffer without clearing if it already exists
     /// and its size matches.
-    grid: SharedVoxelGridBuffer,
+    grid: SharedVoxelGrid,
 
     /// Size of the voxel grid, excluding padding
     size: UVec3,
 }
 
-impl Command for CreateGridCommand {
+impl CreateGridCommand {
+    pub fn new(grid: SharedVoxelGrid, size: UVec3) -> Self {
+        Self { grid, size }
+    }
+}
+
+impl VoxelCommand for CreateGridCommand {
     fn prepare<'a>(
         &mut self,
         device: &Device,
@@ -73,7 +115,8 @@ impl Command for CreateGridCommand {
                 return;
             }
         }
-        *guard = Some(VoxelGridBuffer::new(self.size, device, false));
+        // println!("** Creating grid: {:?}", self.size);
+        *guard = Some(VoxelGrid::new(self.size, device, false));
     }
 
     fn add_pass<'a>(
@@ -90,10 +133,101 @@ impl Command for CreateGridCommand {
     }
 } // impl Command for CreateGridCommand
 
+#[derive(Clone)]
+/// Create a voxel grid with the given size.
+pub struct GetVoxelsCommand {
+    // Retrieve voxels from this grid
+    grid: SharedVoxelGrid,
+
+    // Receives result
+    callback: Arc<dyn Fn(VoxelGridVec) + Send + Sync>,
+
+    // Size of grid at the time it gets copied
+    size: UVec3,
+
+    // Size of the buffer to copy
+    buffer_size: usize,
+
+    // Retrieves the content. COPY_DST | MAP_READ
+    copy_buffer: Arc<Mutex<Option<Buffer>>>,
+}
+
+impl GetVoxelsCommand {
+    pub fn new(grid: SharedVoxelGrid, callback: Arc<dyn Fn(VoxelGridVec) + Send + Sync>) -> Self {
+        Self {
+            grid,
+            callback,
+            size: Default::default(),
+            buffer_size: Default::default(),
+            copy_buffer: Default::default(),
+        }
+    }
+}
+
+impl VoxelCommand for GetVoxelsCommand {
+    fn prepare<'a>(
+        &mut self,
+        device: &Device,
+        _get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
+    ) {
+        let guard = self.grid.lock();
+        let Some(grid) = &*guard else { return };
+        self.size = grid.size;
+        self.buffer_size = get_buf_size(grid.size);
+        *self.copy_buffer.lock() = Some(device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: self.buffer_size as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }));
+    }
+
+    fn add_pass<'a>(
+        &self,
+        _encoder: &mut CommandEncoder,
+        _get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
+    ) {
+    }
+
+    fn add_copy(&self, encoder: &mut CommandEncoder) {
+        let src = self.grid.lock();
+        let dest = self.copy_buffer.lock();
+        encoder.copy_buffer_to_buffer(
+            &src.as_ref().unwrap().buffer,
+            0,
+            dest.as_ref().unwrap(),
+            0,
+            self.buffer_size as u64,
+        );
+    }
+
+    fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
+        let callback = self.callback.clone();
+        let size = self.size;
+        let copy_buffer = self.copy_buffer.clone();
+        self.copy_buffer
+            .lock()
+            .as_ref()
+            .unwrap()
+            .slice(..)
+            .map_async(MapMode::Read, move |result| {
+                if result.is_ok() {
+                    let guard = copy_buffer.lock();
+                    let raw = guard.as_ref().unwrap().slice(..).get_mapped_range();
+                    let mut data = Vec::new();
+                    data.resize(raw.len() / size_of::<u32>(), 0);
+                    data.copy_from_slice(cast_slice::<u8, u32>(&raw));
+                    callback(VoxelGridVec { size, data });
+                    done(result);
+                }
+            });
+    }
+} // impl VoxelCommand for GetVoxelsCommand
+
 /// Convert a voxel grid to a mesh.
 pub struct GenerateMeshCommand {
     /// Grid to turn into a mesh
-    pub grid: SharedVoxelGridBuffer,
+    pub grid: SharedVoxelGrid,
 
     /// Receives the generated vertexes and normals
     pub receive_result: Arc<dyn Fn(Vec<Vec3>, Vec<Vec3>) + 'static + Sync + Send>,
@@ -111,7 +245,7 @@ impl GenerateMeshCommand {
     }
 
     pub fn new(
-        grid: SharedVoxelGridBuffer,
+        grid: SharedVoxelGrid,
         receive_result: Arc<dyn Fn(Vec<Vec3>, Vec<Vec3>) + 'static + Sync + Send>,
     ) -> Self {
         Self {
@@ -122,7 +256,7 @@ impl GenerateMeshCommand {
     }
 }
 
-impl Command for GenerateMeshCommand {
+impl VoxelCommand for GenerateMeshCommand {
     fn prepare<'a>(
         &mut self,
         device: &Device,
@@ -191,7 +325,7 @@ pub enum GeometryOp {
 #[derive(Debug)]
 pub struct GeometryCommand {
     /// Grid to operate on
-    pub grid: SharedVoxelGridBuffer,
+    pub grid: SharedVoxelGrid,
 
     /// Type of geometry operation to perform
     pub geometry: GeometryOp,
@@ -208,17 +342,36 @@ impl GeometryCommand {
         geometry_bind_group_layout(device)
     }
 
-    /// Create the command
-    pub fn new(grid: SharedVoxelGridBuffer, geometry: GeometryOp) -> Self {
+    /// Create a command
+    pub fn new(grid: SharedVoxelGrid, geometry: GeometryOp) -> Self {
         Self {
             grid,
             geometry,
-            cmd_impl: Default::default(),
+            cmd_impl: None,
         }
+    }
+
+    /// Create a sphere command
+    pub fn sphere(
+        grid: SharedVoxelGrid,
+        diameter: u32,
+        offset: IVec3,
+        flags: u32,
+        material: u32,
+    ) -> Self {
+        Self::new(
+            grid,
+            GeometryOp::Sphere {
+                diameter,
+                offset,
+                flags,
+                material,
+            },
+        )
     }
 }
 
-impl Command for GeometryCommand {
+impl VoxelCommand for GeometryCommand {
     fn prepare<'a>(
         &mut self,
         device: &Device,
@@ -265,4 +418,4 @@ impl Command for GeometryCommand {
     fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
         done(Ok(()));
     }
-} // impl Command for GenerateMeshCommand
+} // impl Command for GeometryCommand

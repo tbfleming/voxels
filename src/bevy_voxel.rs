@@ -1,5 +1,4 @@
 use bevy::{
-    ecs::query::Has,
     prelude::*,
     reflect::TypePath,
     render::{
@@ -21,22 +20,19 @@ use std::{
     sync::atomic::{self, AtomicUsize},
     sync::Arc,
 };
+use wgpu::PrimitiveTopology;
 
 use crate::command::*;
-use crate::voxel::*;
 
 pub struct VoxelPlugin;
 
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ExtractComponentPlugin::<VoxelGridData>::default());
-        app.add_plugins(ExtractComponentPlugin::<VoxelGrid>::default());
-        app.add_plugins(ExtractComponentPlugin::<CopyDataToVoxelGrid>::default());
-        app.add_plugins(ExtractComponentPlugin::<CommandList>::default());
-        app.add_systems(First, finalize_copy_data_to_voxel_grid);
+        app.add_plugins(ExtractComponentPlugin::<VoxelCommandList>::default());
+        app.add_plugins(ExtractComponentPlugin::<GenerateMesh>::default());
+        app.add_systems(First, finalize_generate_mesh);
 
         let render_app = app.sub_app_mut(RenderApp);
-        render_app.add_systems(Render, copy_data_to_voxel_grid.in_set(RenderSet::Prepare));
         render_app.add_systems(Render, prepare_command_list.in_set(RenderSet::Prepare));
         render_app.add_systems(Render, map_commands.in_set(RenderSet::Cleanup));
 
@@ -54,91 +50,16 @@ impl Plugin for VoxelPlugin {
     }
 }
 
-// lock order: SharedVoxelGridContent, SharedVoxelGridBuffer
-pub type SharedVoxelGridContent = Arc<Mutex<Option<VoxelGridVec>>>;
-
-#[derive(Component, Clone, Default, Debug, TypePath, ExtractComponent, Deref, DerefMut)]
-pub struct VoxelGridData(SharedVoxelGridContent);
-
-impl VoxelGridData {
-    pub fn new() -> Self {
-        default()
-    }
-}
-
-impl From<VoxelGridVec> for VoxelGridData {
-    fn from(value: VoxelGridVec) -> Self {
-        VoxelGridData(Arc::new(Mutex::new(Some(value))))
-    }
-}
-
-#[derive(Component, Clone, Debug, Default, TypePath, ExtractComponent, Deref, DerefMut)]
-pub struct VoxelGrid(SharedVoxelGridBuffer);
-
-impl VoxelGrid {
-    pub fn new() -> Self {
-        default()
-    }
-}
-
-impl From<VoxelGridBuffer> for VoxelGrid {
-    fn from(value: VoxelGridBuffer) -> Self {
-        VoxelGrid(Arc::new(Mutex::new(Some(value))))
-    }
-}
-
-#[derive(Component, Default, Clone, Debug, TypePath, ExtractComponent)]
-#[component(storage = "SparseSet")]
-pub struct CopyDataToVoxelGrid;
-
-// TODO: move this to the command system?
-fn copy_data_to_voxel_grid(
-    render_device: Res<RenderDevice>,
-    query: Query<(&VoxelGridData, &VoxelGrid), Has<CopyDataToVoxelGrid>>,
-) {
-    for (voxel_grid_data, voxel_grid_storage_buffer) in query.iter() {
-        let data_lock = voxel_grid_data.lock();
-        let mut vg_buffer_lock = voxel_grid_storage_buffer.lock();
-        if vg_buffer_lock.is_some() {
-            continue;
-        }
-        let Some(data) = &*data_lock else {
-            println!("** copy_data_to_storage: no data");
-            continue;
-        };
-        println!("** copy_data_to_storage");
-        *vg_buffer_lock = Some(VoxelGridBuffer::from_content(
-            data,
-            render_device.wgpu_device(),
-        ));
-    }
-}
-
-// TODO: move this to the command system?
-fn finalize_copy_data_to_voxel_grid(
-    mut commands: Commands,
-    query: Query<(Entity, &VoxelGrid), Has<CopyDataToVoxelGrid>>,
-) {
-    for (entity, voxel_grid_storage_buffer) in query.iter() {
-        let vg_buffer = voxel_grid_storage_buffer.lock();
-        if vg_buffer.is_some() {
-            commands.entity(entity).remove::<CopyDataToVoxelGrid>();
-        }
-    }
-}
-
-pub type CommandVec = Vec<Box<dyn Command + Send + Sync>>;
-
 /// A list of commands that can be run on the GPU.
 ///
 /// This acts as a handle; clones point to the same list.
 #[derive(Component, Default, Clone, TypePath, ExtractComponent)]
 #[component(storage = "SparseSet")]
-pub struct CommandList(SharedCommandListData);
+pub struct VoxelCommandList(SharedCommandListData);
 
-impl CommandList {
+impl VoxelCommandList {
     /// Create a new command list.
-    pub fn new(commands: CommandVec) -> Self {
+    pub fn new(commands: VoxelCommandVec) -> Self {
         Self(Arc::new(CommandListData {
             state: CommandListState::Init.into(),
             commands: commands.into(),
@@ -182,11 +103,11 @@ impl CommandList {
 /// mutex locked until dropped.
 pub struct CommandGuard<'a> {
     state: MutexGuard<'a, CommandListState>, // dropped first
-    commands: MutexGuard<'a, CommandVec>,
+    commands: MutexGuard<'a, VoxelCommandVec>,
 }
 
 impl<'a> Deref for CommandGuard<'a> {
-    type Target = CommandVec;
+    type Target = VoxelCommandVec;
 
     fn deref(&self) -> &Self::Target {
         &self.commands
@@ -199,7 +120,7 @@ impl<'a> DerefMut for CommandGuard<'a> {
     }
 }
 
-/// State the a command list can be in.
+/// State a command list can be in.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandListState {
     /// The command list is ready to be run.
@@ -216,11 +137,57 @@ pub enum CommandListState {
     Done,
 }
 
+/// Generate a mesh from a voxel grid.
+///
+/// `[create_command]` creates a command that can be added to a command list.
+/// This command will generate a mesh from the given voxel grid. After the
+/// command list is run, this component will convert it to a `[bevy::prelude::Mesh]`
+/// and add it to the entity.
+#[derive(Component, Default, Clone, Debug, TypePath, ExtractComponent)]
+#[component(storage = "SparseSet")]
+pub struct GenerateMesh(Arc<Mutex<Option<Mesh>>>);
+
+impl GenerateMesh {
+    pub fn new() -> Self {
+        default()
+    }
+
+    pub fn create_command(&self, grid: SharedVoxelGrid) -> GenerateMeshCommand {
+        let shared_mesh = self.0.clone();
+        GenerateMeshCommand::new(
+            grid,
+            Arc::new(move |vertexes, normals| {
+                let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+                // println!("** GenerateMeshCommand: callback");
+                // println!("{:?}\n", vertexes);
+                // println!("{:?}", vertexes);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertexes);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+                *shared_mesh.lock() = Some(mesh);
+            }),
+        )
+    }
+}
+
+fn finalize_generate_mesh(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut query: Query<(Entity, &GenerateMesh)>,
+) {
+    for (entity, generate_mesh) in query.iter_mut() {
+        let Some(mesh) = generate_mesh.0.lock().take() else {
+            continue;
+        };
+        // println!("** finalize_generate_mesh");
+        commands.entity(entity).insert(meshes.add(mesh));
+    }
+}
+
 #[derive(Default)]
-pub struct CommandListData {
+struct CommandListData {
     // lock order: commands, state
+    commands: Mutex<VoxelCommandVec>,
     state: Mutex<CommandListState>,
-    commands: Mutex<CommandVec>,
 }
 
 impl CommandListData {
@@ -236,17 +203,17 @@ type SharedCommandListData = Arc<CommandListData>;
 fn prepare_command_list(
     render_device: Res<RenderDevice>,
     mut pipeline: ResMut<CommandPipeline>,
-    query: Query<&CommandList>,
+    query: Query<&VoxelCommandList>,
 ) {
     // println!("** prepare_command_list");
     for command_list in query.iter() {
         // println!("** prepare_command_list: ?");
         let mut guard = command_list.0.lock();
-        let CommandListState::Init = *guard.state else {
+        if *guard.state != CommandListState::Init {
             continue;
         };
-        println!("** prepare_command_list: Init");
-        println!("   commands: {:?}", guard.commands.len());
+        // println!("** prepare_command_list: Init");
+        // println!("   commands: {:?}", guard.commands.len());
         for command in guard.commands.iter_mut() {
             command.prepare(render_device.wgpu_device(), &mut |name| {
                 if let Some(entry) = pipeline.map.get(name) {
@@ -267,7 +234,7 @@ fn map_commands(mut pipeline: ResMut<CommandPipeline>) {
             mut state,
             mut commands,
         } = command_list.lock();
-        let CommandListState::Busy = *state else {
+        if *state != CommandListState::Busy {
             continue;
         };
         *state = CommandListState::Mapping;
@@ -277,9 +244,9 @@ fn map_commands(mut pipeline: ResMut<CommandPipeline>) {
         let count = Arc::new(AtomicUsize::new(commands.len()));
         let callback = {
             let command_list = command_list.clone();
-            move |res| {
+            move |_res| {
                 // TODO: handle map error
-                println!("mapped?: {:?}", res);
+                // println!("mapped?: {:?}", _res);
                 if count.fetch_sub(1, atomic::Ordering::Relaxed) == 0 {
                     *command_list.state.lock() = CommandListState::Done;
                 }
@@ -298,7 +265,7 @@ struct LayoutAndPipeline {
 }
 
 #[derive(Resource)]
-pub struct CommandPipeline {
+struct CommandPipeline {
     map: HashMap<&'static str, LayoutAndPipeline>,
     command_lists: Vec<SharedCommandListData>,
 }
@@ -352,7 +319,7 @@ impl render_graph::Node for VoxelCommandListsNode {
         let encoder = render_context.command_encoder();
         for command_list in pipeline.command_lists.iter() {
             let guard = command_list.lock();
-            let CommandListState::Busy = *guard.state else {
+            if *guard.state != CommandListState::Busy {
                 continue;
             };
             for command in guard.commands.iter() {

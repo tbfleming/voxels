@@ -1,13 +1,9 @@
 mod bevy_voxel;
 mod command;
-mod generate_mesh;
-mod shape;
 mod voxel;
 
 pub use bevy_voxel::*;
 pub use command::*;
-pub use generate_mesh::*;
-pub use shape::*;
 pub use voxel::*;
 
 /// Unstable constants and types for communicating with the shaders.

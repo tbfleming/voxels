@@ -229,6 +229,10 @@ fn paste_vertex(state: ptr<function, paste_state>, src_raw: u32) {
     (*state).raw = ((*state).raw & 0xff000000u) | (src_raw & 0x00ffffffu);
 }
 
+fn paste_end(state: ptr<function, paste_state>) {
+    voxel_grid_out[index(args.out_size, (*state).dest_pos)] = (*state).raw;
+}
+
 fn sphere_inside(pos: vec3<i32>, size: u32) -> bool {
     let r = f32(size) / 2.0;
     let d = vec3(f32(pos.x) + 0.5 - r, f32(pos.y) + 0.5 - r, f32(pos.z) + 0.5 - r);
@@ -278,7 +282,7 @@ fn sphere_vertex(pos: vec3<i32>, size: u32) -> u32 {
 //     diameter:    Diameter of sphere
 // }
 //
-// This needs ceil(((args.diameter.x+1) * (args.diameter.y+1) * (args.diameter.z+1)) / 64) workgroups.
+// This needs ceil(((args.diameter+1) * (args.diameter+1) * (args.diameter+1)) / 64) workgroups.
 @compute @workgroup_size(64)
 fn paste_sphere(@builtin(global_invocation_id) invocation: vec3<u32>) {
     var state = paste_state(vec3(args.diameter, args.diameter, args.diameter), vec3(0, 0, 0), vec3(0, 0, 0), 0u);
@@ -291,4 +295,5 @@ fn paste_sphere(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if sphere_include_vertex(state.src_pos, args.diameter) {
         paste_vertex(&state, sphere_vertex(state.src_pos, args.diameter));
     }
+    paste_end(&state);
 }
