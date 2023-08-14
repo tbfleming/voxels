@@ -129,6 +129,7 @@ impl VoxelCommand for CreateGridCommand {
     fn add_copy(&self, _encoder: &mut CommandEncoder) {}
 
     fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
+        // println!("@@@ CreateGridCommand::async_finish: nop");
         done(Ok(()));
     }
 } // impl Command for CreateGridCommand
@@ -205,12 +206,14 @@ impl VoxelCommand for GetVoxelsCommand {
         let callback = self.callback.clone();
         let size = self.size;
         let copy_buffer = self.copy_buffer.clone();
+        // println!("@@@ GetVoxelsCommand::async_finish mapping...");
         self.copy_buffer
             .lock()
             .as_ref()
             .unwrap()
             .slice(..)
             .map_async(MapMode::Read, move |result| {
+                // println!("@@@ GetVoxelsCommand::async_finish mapped: {:?}", result);
                 if result.is_ok() {
                     let guard = copy_buffer.lock();
                     let raw = guard.as_ref().unwrap().slice(..).get_mapped_range();
@@ -218,8 +221,8 @@ impl VoxelCommand for GetVoxelsCommand {
                     data.resize(raw.len() / size_of::<u32>(), 0);
                     data.copy_from_slice(cast_slice::<u8, u32>(&raw));
                     callback(VoxelGridVec { size, data });
-                    done(result);
                 }
+                done(result);
             });
     }
 } // impl VoxelCommand for GetVoxelsCommand
@@ -287,17 +290,17 @@ impl VoxelCommand for GenerateMeshCommand {
 
     fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
         let receive_result = self.receive_result.clone();
+        // println!("@@@ GenerateMeshCommand::async_finish mapping...");
         self.cmd_impl
             .take()
             .unwrap()
             .async_map_buffer(move |cmd_impl, res| {
+                // println!("@@@ GenerateMeshCommand::async_finish mapped: {:?}", res);
                 if res.is_ok() {
                     let (m, n) = cmd_impl.get_mesh();
                     receive_result(m, n);
-                    done(Ok(()));
-                } else {
-                    done(res);
                 }
+                done(res);
             });
     }
 } // impl Command for GenerateMeshCommand
@@ -362,6 +365,7 @@ impl GeometryCommand {
 
     /// Create a command
     pub fn new(grid: SharedVoxelGrid, geometry: GeometryOp) -> Self {
+        // println!("@@@ GeometryCommand::new");
         Self {
             grid,
             geometry,
@@ -414,6 +418,7 @@ impl VoxelCommand for GeometryCommand {
         device: &Device,
         get_bind_group_layout: &mut dyn FnMut(&str) -> &'a BindGroupLayout,
     ) {
+        // println!("@@@ GeometryCommand::prepare");
         let guard = self.grid.lock();
         let grid = guard.as_ref().expect("Missing grid in GeometryCommand");
         match &self.geometry {
@@ -423,6 +428,7 @@ impl VoxelCommand for GeometryCommand {
                 flags,
                 material,
             } => {
+                // println!("@@@ GeometryCommand::prepare: PasteCube");
                 self.cmd_impl = Some(GeometryImpl::paste_cube(
                     device,
                     get_bind_group_layout(Self::PASTE_CUBE_ENTRY_POINT),
@@ -440,6 +446,10 @@ impl VoxelCommand for GeometryCommand {
                 flags,
                 material,
             } => {
+                // println!(
+                //     "@@@ GeometryCommand::prepare: PasteSphere: diameter: {}",
+                //     diameter
+                // );
                 self.cmd_impl = Some(GeometryImpl::paste_sphere(
                     device,
                     get_bind_group_layout(Self::PASTE_SPHERE_ENTRY_POINT),
@@ -458,6 +468,7 @@ impl VoxelCommand for GeometryCommand {
         encoder: &mut CommandEncoder,
         get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
     ) {
+        // println!("@@@ GeometryCommand::add_pass");
         let entry_point = match &self.geometry {
             GeometryOp::PasteCube { .. } => Self::PASTE_CUBE_ENTRY_POINT,
             GeometryOp::PasteSphere { .. } => Self::PASTE_SPHERE_ENTRY_POINT,
@@ -471,6 +482,7 @@ impl VoxelCommand for GeometryCommand {
     fn add_copy(&self, _encoder: &mut CommandEncoder) {}
 
     fn async_finish(&mut self, mut done: Box<dyn FnMut(Result<(), BufferAsyncError>) + Send>) {
+        // println!("@@@ GeometryCommand::async_finish: nop");
         done(Ok(()));
     }
 } // impl Command for GeometryCommand

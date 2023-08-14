@@ -72,7 +72,7 @@ impl VoxelCommandList {
     /// This locks the list's mutex; the guard keeps it locked until dropped.
     pub fn commands_mut(&self) -> Option<CommandGuard<'_>> {
         let guard = self.0.lock();
-        if *guard.state != CommandListState::Init || *guard.state == CommandListState::Done {
+        if *guard.state == CommandListState::Init || *guard.state == CommandListState::Done {
             Some(guard)
         } else {
             None
@@ -207,12 +207,11 @@ fn prepare_command_list(
 ) {
     // println!("** prepare_command_list");
     for command_list in query.iter() {
-        // println!("** prepare_command_list: ?");
         let mut guard = command_list.0.lock();
+        // println!("** prepare_command_list: {:?}", guard.state);
         if *guard.state != CommandListState::Init {
             continue;
         };
-        // println!("** prepare_command_list: Init");
         // println!("   commands: {:?}", guard.commands.len());
         for command in guard.commands.iter_mut() {
             command.prepare(render_device.wgpu_device(), &mut |name| {
@@ -241,20 +240,33 @@ fn map_commands(mut pipeline: ResMut<CommandPipeline>) {
 
         drop(state); // avoid deadlock inside callback
 
-        let count = Arc::new(AtomicUsize::new(commands.len()));
-        let callback = {
-            let command_list = command_list.clone();
-            move |_res| {
-                // TODO: handle map error
-                // println!("mapped?: {:?}", _res);
-                if count.fetch_sub(1, atomic::Ordering::Relaxed) == 0 {
-                    *command_list.state.lock() = CommandListState::Done;
+        if commands.len() == 0 {
+            // println!("** map_commands: commands.len() == 0");
+            *command_list.state.lock() = CommandListState::Done;
+        } else {
+            let count = Arc::new(AtomicUsize::new(commands.len()));
+            // println!(
+            //     "** map_commands: starting count: {}",
+            //     count.load(atomic::Ordering::Relaxed)
+            // );
+            let callback = {
+                let command_list = command_list.clone();
+                move |_res| {
+                    // TODO: handle map error
+                    // println!("mapped?: {:?}", _res);
+                    // println!(
+                    //     "** map_commands: callback {:?}",
+                    //     count.load(atomic::Ordering::Relaxed)
+                    // );
+                    if count.fetch_sub(1, atomic::Ordering::Relaxed) == 1 {
+                        *command_list.state.lock() = CommandListState::Done;
+                    }
                 }
-            }
-        };
+            };
 
-        for command in commands.iter_mut() {
-            command.async_finish(Box::new(callback.clone()));
+            for command in commands.iter_mut() {
+                command.async_finish(Box::new(callback.clone()));
+            }
         }
     }
 }

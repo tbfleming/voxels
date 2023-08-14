@@ -13,6 +13,7 @@ bevy_screen_diagnostics = "0.3.0"
 bytemuck = "1.13.1"
 glam = "0.24.1"
 parking_lot = "0.12.1"
+rand = "0.8.5"
 wgpu = "0.16.3"
 
 [profile.dev.package."*"]
