@@ -9,6 +9,7 @@ use wgpu::{
 };
 
 pub const GENERATE_MESH_ENTRY_POINT: &str = "generate_mesh";
+pub const PASTE_CUBE_ENTRY_POINT: &str = "paste_cube";
 pub const PASTE_SPHERE_ENTRY_POINT: &str = "paste_sphere";
 
 pub mod unstable {
@@ -21,17 +22,19 @@ pub mod unstable {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
     pub struct ShaderArgs {
         pub a_size: UVec3,
-        pub _padding0: u32,
+        pub _0: u32, // padding
         pub b_size: UVec3,
-        pub _padding1: u32,
+        pub _1: u32,
         pub out_size: UVec3,
-        pub _padding2: u32,
+        pub _2: u32,
         pub offset: IVec3,
+        pub _3: u32,
+        pub size: UVec3,
         pub flags: u32,
         pub material: u32,
         pub diameter: u32,
-        pub _padding3: u32,
-        pub _padding4: u32,
+        pub _4: u32,
+        pub _5: u32,
     }
 
     pub const WGSL_ARGS_BINDING: u32 = 0;
@@ -54,6 +57,7 @@ pub mod unstable {
     pub const GENERATE_MESH_VOXELS_PER_WORKGROUP: u32 =
         GENERATE_MESH_VOXELS_PER_INVOCATION * GENERATE_MESH_WORKGROUP_SIZE;
 
+    pub const PASTE_CUBE_VOXELS_PER_WORKGROUP: u32 = 64;
     pub const PASTE_SPHERE_VOXELS_PER_WORKGROUP: u32 = 64;
 }
 
@@ -588,7 +592,45 @@ impl GeometryImpl {
         }
     }
 
-    /// Create buffers and bind group
+    /// Create buffers and bind group for the shader's paste_cube function.
+    ///
+    /// * grid_buffer:  Voxel grid to modify
+    /// * size:         Diameter of cube
+    /// * offset:       Offset cube's coordinates
+    /// * flags:        Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
+    ///                 Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
+    /// * material:     Material to paste
+    pub fn paste_cube(
+        device: &Device,
+        bind_group_layout: &BindGroupLayout,
+        grid_buffer: &VoxelGrid,
+        size: UVec3,
+        offset: IVec3,
+        flags: u32,
+        material: u32,
+    ) -> Self {
+        let args = ShaderArgs {
+            out_size: grid_buffer.size,
+            size,
+            offset,
+            flags,
+            material,
+            ..Default::default()
+        };
+        let workgroup_size =
+            ((size.x + 1) * (size.y + 1) * (size.z + 1) + PASTE_CUBE_VOXELS_PER_WORKGROUP - 1)
+                / PASTE_CUBE_VOXELS_PER_WORKGROUP;
+        Self::new_impl(
+            device,
+            bind_group_layout,
+            "paste_cube_bind_group",
+            grid_buffer,
+            args,
+            UVec3::new(workgroup_size, 1, 1),
+        )
+    }
+
+    /// Create buffers and bind group for the shader's paste_sphere function.
     ///
     /// * grid_buffer:  Voxel grid to modify
     /// * diameter:     Diameter of sphere
@@ -596,7 +638,7 @@ impl GeometryImpl {
     /// * flags:        Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
     ///                 Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
     /// * material:     Material to paste
-    pub fn new_sphere(
+    pub fn paste_sphere(
         device: &Device,
         bind_group_layout: &BindGroupLayout,
         grid_buffer: &VoxelGrid,

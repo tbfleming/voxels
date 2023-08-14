@@ -294,6 +294,10 @@ impl FromWorld for CommandPipeline {
             GenerateMeshCommand::bind_group_layout(device),
         );
         create_pipeline(
+            GeometryCommand::PASTE_CUBE_ENTRY_POINT,
+            GeometryCommand::bind_group_layout(device),
+        );
+        create_pipeline(
             GeometryCommand::PASTE_SPHERE_ENTRY_POINT,
             GeometryCommand::bind_group_layout(device),
         );

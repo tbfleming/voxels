@@ -10,6 +10,7 @@ struct args_t {
     b_size: vec3<u32>,
     out_size: vec3<u32>,
     offset: vec3<i32>,
+    size: vec3<u32>,
     flags: u32,
     material: u32,
     diameter: u32,
@@ -231,6 +232,34 @@ fn paste_vertex(state: ptr<function, paste_state>, src_raw: u32) {
 
 fn paste_end(state: ptr<function, paste_state>) {
     voxel_grid_out[index(args.out_size, (*state).dest_pos)] = (*state).raw;
+}
+
+// Paste cube into voxel_grid_out. The cube will be centered on
+// (args.offset + vec3(diameter/2, diameter/2, diameter/2)).
+//
+// args: {
+//     out_size:    Size of voxel_grid_out
+//     offset:      Offset cube's coordinates
+//     flags:       Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
+//                  Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
+//     material:    Material to paste
+//     size:        Size of cube
+// }
+//
+// This needs ceil(((args.size.x+1) * (args.size.y+1) * (args.size.z+1)) / 64) workgroups.
+@compute @workgroup_size(64)
+fn paste_cube(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    var state = paste_state(args.size, vec3(0, 0, 0), vec3(0, 0, 0), 0u);
+    if !paste_begin(i32(invocation.x), &state) {
+        return;
+    }
+    if state.src_pos.x < i32(args.size.x) && state.src_pos.y < i32(args.size.y) && state.src_pos.z < i32(args.size.z) {
+        paste_material(&state, args.material);
+    }
+    if state.src_pos.x <= i32(args.size.x) && state.src_pos.y <= i32(args.size.y) && state.src_pos.z <= i32(args.size.z) {
+        paste_vertex(&state, 0u);
+    }
+    paste_end(&state);
 }
 
 fn sphere_inside(pos: vec3<i32>, size: u32) -> bool {

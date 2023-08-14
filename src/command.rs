@@ -305,7 +305,22 @@ impl VoxelCommand for GenerateMeshCommand {
 /// Type of geometry operation to perform
 #[derive(Debug, Clone)]
 pub enum GeometryOp {
-    Sphere {
+    PasteCube {
+        /// Size of cube
+        size: UVec3,
+
+        /// Offset cube's coordinates
+        offset: IVec3,
+
+        /// Any of: PASTE_MATERIAL, PASTE_MATERIAL_ARG, PASTE_VERTEXES.
+        /// Note: PASTE_MATERIAL_ARG and PASTE_MATERIAL act the same.
+        flags: u32,
+
+        /// Material to paste
+        material: u32,
+    },
+
+    PasteSphere {
         /// Diameter of sphere
         diameter: u32,
 
@@ -334,7 +349,10 @@ pub struct GeometryCommand {
 }
 
 impl GeometryCommand {
-    /// PasteSphere entry point
+    /// Shader entry point
+    pub const PASTE_CUBE_ENTRY_POINT: &'static str = PASTE_CUBE_ENTRY_POINT;
+
+    /// Shader entry point
     pub const PASTE_SPHERE_ENTRY_POINT: &'static str = PASTE_SPHERE_ENTRY_POINT;
 
     /// Create bind group layout. This is the same for all geometry operations.
@@ -351,6 +369,25 @@ impl GeometryCommand {
         }
     }
 
+    /// Create a cube command
+    pub fn cube(
+        grid: SharedVoxelGrid,
+        size: UVec3,
+        offset: IVec3,
+        flags: u32,
+        material: u32,
+    ) -> Self {
+        Self::new(
+            grid,
+            GeometryOp::PasteCube {
+                size,
+                offset,
+                flags,
+                material,
+            },
+        )
+    }
+
     /// Create a sphere command
     pub fn sphere(
         grid: SharedVoxelGrid,
@@ -361,7 +398,7 @@ impl GeometryCommand {
     ) -> Self {
         Self::new(
             grid,
-            GeometryOp::Sphere {
+            GeometryOp::PasteSphere {
                 diameter,
                 offset,
                 flags,
@@ -380,13 +417,30 @@ impl VoxelCommand for GeometryCommand {
         let guard = self.grid.lock();
         let grid = guard.as_ref().expect("Missing grid in GeometryCommand");
         match &self.geometry {
-            GeometryOp::Sphere {
+            GeometryOp::PasteCube {
+                size,
+                offset,
+                flags,
+                material,
+            } => {
+                self.cmd_impl = Some(GeometryImpl::paste_cube(
+                    device,
+                    get_bind_group_layout(Self::PASTE_CUBE_ENTRY_POINT),
+                    grid,
+                    *size,
+                    *offset,
+                    *flags,
+                    *material,
+                ));
+            }
+
+            GeometryOp::PasteSphere {
                 diameter,
                 offset,
                 flags,
                 material,
             } => {
-                self.cmd_impl = Some(GeometryImpl::new_sphere(
+                self.cmd_impl = Some(GeometryImpl::paste_sphere(
                     device,
                     get_bind_group_layout(Self::PASTE_SPHERE_ENTRY_POINT),
                     grid,
@@ -405,7 +459,8 @@ impl VoxelCommand for GeometryCommand {
         get_pipeline: &mut dyn FnMut(&str) -> &'a ComputePipeline,
     ) {
         let entry_point = match &self.geometry {
-            GeometryOp::Sphere { .. } => Self::PASTE_SPHERE_ENTRY_POINT,
+            GeometryOp::PasteCube { .. } => Self::PASTE_CUBE_ENTRY_POINT,
+            GeometryOp::PasteSphere { .. } => Self::PASTE_SPHERE_ENTRY_POINT,
         };
         self.cmd_impl
             .as_ref()
